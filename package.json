@@ -1,0 +1,18 @@
+{
+  "name": "bak",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.1"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "test": "tsx scripts/test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
