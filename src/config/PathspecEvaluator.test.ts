@@ -193,3 +193,55 @@ test('re-inclusion through a broader alias also reaches aliases rooted inside it
   ])
   assert.deepEqual(evaluator.evaluate('/data/sub/cache/other'), [])
 })
+
+test('filesystem binding recompiles shared rules without changing destination spelling or the original', () => {
+  const original = new PathspecEvaluator('/data\n/mirror\n!/mirror/cache\n/mirror/cache/keep')
+  const bound = original.bindSources(original.getSourcePaths().map(source => ({
+    source,
+    resolved: { ...source, path: source.path.replace(/^mirror(?=\/|$)/, 'data') },
+  })))
+  assert.deepEqual(bound.evaluate('/data/cache/other'), [])
+  assert.deepEqual(bound.evaluate('/data/cache/keep/a'), [
+    { kind: 'physical', root: '/', path: 'data/cache/keep/a' },
+    { kind: 'physical', root: '/', path: 'mirror/cache/keep/a' },
+  ])
+  assert.notDeepEqual(original.evaluate('/data/cache/other'), [])
+  assert.throws(() => original.bindSources([]))
+})
+
+test('binding enumerates exclusions and alias suffixes, not unused variables', () => {
+  const evaluator = new PathspecEvaluator('$Unused = /unused\n#copy = /mirror\n!#copy/cache')
+  assert.deepEqual(evaluator.getSourcePaths(), [
+    { root: '/', path: 'mirror' },
+    { root: '/', path: 'mirror/cache' },
+  ])
+})
+
+test('followed content inherits rule order but later resolved rules still apply', () => {
+  const evaluator = new PathspecEvaluator('/selected\n!/outside/cache\n/outside/cache/keep')
+  const context = evaluator.enter({ root: '/', path: 'selected/link' })
+  assert.equal(context.selected, true)
+  assert.equal(evaluator.enter({ root: '/', path: 'outside/file' }, context).selected, true)
+  assert.equal(evaluator.enter({ root: '/', path: 'outside/cache' }, context).selected, false)
+  assert.equal(evaluator.enter({ root: '/', path: 'outside/cache/keep' }, context).selected, true)
+})
+
+test('structured discovered paths keep literal wildcard characters and cannot traverse parents', () => {
+  const evaluator = new PathspecEvaluator('/data')
+  assert.deepEqual(evaluator.evaluate({ root: '/', path: 'data/[draft].txt' }), [
+    { kind: 'physical', root: '/', path: 'data/[draft].txt' },
+  ])
+  assert.throws(() => evaluator.evaluate({ root: '/', path: 'data/../secret' }))
+})
+
+test('deep re-inclusion across an external link preserves the alias-relative suffix', () => {
+  const original = new PathspecEvaluator('#one = /selected\n#two = /selected\n!#one/link/cache\n#two/link/cache/keep')
+  const bound = original.bindSources(original.getSourcePaths().map(source => ({
+    source,
+    resolved: { ...source, path: source.path.replace(/^selected\/link(?=\/|$)/, 'outside') },
+  })))
+  assert.deepEqual(bound.evaluate('/outside/cache/keep/a'), [
+    { kind: 'alias', path: 'one/link/cache/keep/a' },
+    { kind: 'alias', path: 'two/link/cache/keep/a' },
+  ])
+})

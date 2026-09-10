@@ -1,6 +1,6 @@
 # bak
 
-Git-native filesystem backup utility, under development. This first slice implements literal pathspec selection and a configurable test runner. No backup, push, restore or mount commands exist yet.
+Git-native filesystem backup utility, under development. Implements literal pathspec selection, read-only filesystem/repository scanning and a configurable test runner. No backup, push, restore or mount commands exist yet.
 
 ## development
 
@@ -32,7 +32,7 @@ Compact output reports one totals line, with failing-test errors and locations. 
 
 No test files, no executed tests (including all skipped/TODO or unmatched filters), test failures and runner/load errors produce exit code 1. A successful executed suite produces exit code 0.
 
-Runner regression tests create isolated fixtures under the OS temporary directory and remove only their own fixtures. Tests and typechecking otherwise emit no build output.
+Tests create isolated fixtures under the OS temporary directory and remove only their own fixtures. Scanner fixtures include Git repositories, commits, linked worktrees, junctions and hardlinks. Tests require system Git. Tests and typechecking emit no build output.
 
 ## path selection
 
@@ -46,6 +46,18 @@ const roots = evaluator.getScanRoots()
 const destinations = evaluator.evaluate('C:/data/file.txt')
 ````
 
-Future slices must settle scanning, final backup-tree path encoding/collisions, wildcard semantics, git capture, repository preservation and remote storage before exposing backup commands.
+## scanning
 
-Planned ownership: `scanning-utils.ts` handles filesystem mechanics; `Scanner.ts` handles traversal and repository detection. Scan results stream entries, repository records and problems with an explicit completion outcome; consumers can collect them. Commit must remain unavailable until the entire selected snapshot can be produced, including successful capture after scanning.
+````ts
+import Scanner from './src/filesystem/Scanner.ts'
+
+const scanner = new Scanner(evaluator)
+for await (const record of scanner.scan()) {
+  // Consume root exposures, shared entries, links, repositories and problems.
+  // Only a final complete completion record authorises using the whole scan.
+}
+````
+
+`PathspecEvaluator` owns selection, `scanning-utils.ts` owns filesystem/process mechanics, and `Scanner` owns traversal, sharing and repository discovery. See [scanner contracts](docs/scanning.md) for stream collection, link policy and failure handling.
+
+A complete scan is not a captured snapshot. Commit must remain unavailable until the entire selected snapshot can be produced, including successful file and repository capture. Final backup-tree encoding/collisions, wildcard syntax, capture, durable repository identity and remote storage remain unimplemented.

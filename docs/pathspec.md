@@ -67,7 +67,7 @@ Backslashes remain literal in quotes, then normalise to `/` as path separators. 
 
 Accept absolute drive paths (`C:/data`), UNC paths (`//server/share/data`) and POSIX paths (`/home/user`). Relative physical roots and incomplete UNC roots fail. Aliases must be nonempty relative paths.
 
-Matching is lexical and case-sensitive on complete components: `/foo` does not match `/foobar`. Separators normalise, `.` and redundant separators are removed, and `..` is rejected rather than resolved. Path spelling otherwise remains unchanged. Leading `//` denotes UNC, not POSIX.
+Standalone matching is lexical and case-sensitive on complete components: `/foo` does not match `/foobar`. Separators normalise, `.` and redundant separators are removed, and `..` is rejected rather than resolved. Path spelling otherwise remains unchanged. Leading `//` denotes UNC, not POSIX.
 
 `evaluate(physicalPath)` returns:
 
@@ -91,12 +91,22 @@ const roots = evaluator.getScanRoots()
 
 The constructor compiles text once using an ordered statement-handler registry. Compiled exposure and shared-selection rules remain private. `evaluate` validates candidates and returns deduplicated destinations in exposure-declaration order without changing selection state.
 
-`getScanRoots()` returns unique effective inclusion-source paths as `{ root, path }`. It omits fully excluded sources and includes independently re-included descendants beneath blocked ancestors. Roots can overlap; a scanner must deduplicate traversal. Neither method touches the filesystem or exposes mutable compiled state.
+`getScanRoots()` returns unique effective inclusion-source paths as `{ root, path }`. It omits fully excluded sources and includes independently re-included descendants beneath blocked ancestors. Roots can overlap; the scanner deduplicates traversal.
+
+`getExposures()` returns `{ source, origin, destination }` records. `source` identifies selected content; `origin` retains the original source spelling, including a junction route. A shared source can have several exposures.
+
+`getSourcePaths()` includes all rule-source paths, including exclusions and expanded alias suffixes, but not unused variables. `bindSources([{ source, resolved }])` recompiles into a new evaluator using complete scanner-supplied bindings. Original destination spelling and the original evaluator remain unchanged. No evaluator method performs filesystem access or exposes mutable compiled state.
+
+The scanner resolves configured paths before traversal. For example, if `D:/mirror` is a junction to `C:/data`, `!D:/mirror/cache` also excludes `C:/data/cache`. Deep re-inclusion retains the original destination suffix even when a link leaves its lexical parent directory.
+
+Traversal uses `enter(path, inheritedContext)` for entry selection and `contents(path, inheritedContext)` for descendant selection. Contexts retain the winning rule's order so following an external link does not restart rule ordering. `equivalentContexts` compares selection behaviour at all literal-rule boundaries, including strict-root versus descendant selection.
+
+`evaluate` also accepts structured `{ root, path }` candidates for discovered filenames. Their characters are literal; brackets and similar filename characters do not become pattern syntax. Parent traversal and malformed structured paths still fail.
 
 ## boundaries
 
-Literal subtrees only. Wildcard characters `*`, `?`, `[`, `]`, `{`, `}` are rejected, including in quotes. This is not a full git pathspec or gitignore implementation.
+Literal subtrees only. Wildcard characters `*`, `?`, `[`, `]`, `{`, `}` are rejected in pathspec expressions, including in quotes. This is not a full git pathspec or gitignore implementation.
 
-No filesystem access, existence checks, link traversal, filesystem case/identity resolution, git discovery or cross-source destination collision checks. `.git` has no implicit behaviour beyond shared selection. Alias destinations do not distinguish repositories from ordinary folders.
+The evaluator itself does not access files, discover links/repositories or check cross-source destination collisions. Filesystem bindings are supplied by the scanner. `.git` has no implicit evaluator behaviour beyond shared selection. Alias destinations do not distinguish repositories from ordinary folders.
 
-Later scanning must honour selection when discovering repository boundaries. Final tree encoding and collision handling belong to snapshot construction. Junctions, source mutation, backup creation and restoration are outside this slice.
+See [scanning](scanning.md) for link traversal, repository boundaries and incomplete scans. Final tree encoding, destination collisions, capture, backup creation and restoration belong to later snapshot work.
