@@ -92,7 +92,11 @@ test('selected', () => { throw new Error('must-not-execute') })`,
 test('cancelled tests cannot become successful runs', async () => {
   const cancelled = await probe([
     `import { test } from 'node:test'
-test('unfinished-marker', async () => { await new Promise(() => {}) })`,
+const controller = new AbortController()
+test('unfinished-marker', { signal: controller.signal }, async () => {
+  controller.abort()
+  await new Promise(() => {})
+})`,
   ])
   assert.equal(cancelled.code, 1)
   assert.ok(cancelled.stderr.includes('unfinished-marker'), cancelled.stderr)

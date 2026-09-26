@@ -1,6 +1,22 @@
 # bak
 
-Git-native filesystem backup utility, under development. Implements literal pathspec selection, read-only filesystem/repository scanning and a configurable test runner. No backup, push, restore or mount commands exist yet.
+Git-native filesystem backup utility, under development. Creates local snapshots of selected files, repositories and linked worktrees. Includes a configurable runner over `node:test`.
+
+## local snapshots
+
+````sh
+pnpm bak --root C:/backups/personal init
+# edit C:/backups/personal/bak.pathspec
+pnpm bak --root C:/backups/personal commit -m "first backup"
+pnpm bak --root C:/backups/personal log
+pnpm bak --root C:/backups/personal show HEAD repo:/widget/src/index.ts
+````
+
+Commit captures the entire pathspec; there is no staging command. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `show <snapshot>` lists the snapshot root; supplying a file path streams its bytes.
+
+Snapshots retain their objects locally without automatic eviction. No remote storage, encryption, restore command, live projection or mounted historical view exists yet. Local Git objects are not encrypted by bak. Protect the backup directory appropriately.
+
+See [snapshot contracts and limits](docs/snapshots.md) before relying on this development version. Source-change checks are not an atomic filesystem snapshot, and platform metadata coverage is limited.
 
 ## development
 
@@ -58,6 +74,6 @@ for await (const record of scanner.scan()) {
 }
 ````
 
-`PathspecEvaluator` owns selection, `scanning-utils.ts` owns filesystem/process mechanics, and `Scanner` owns traversal, sharing and repository discovery. See [scanner contracts](docs/scanning.md) for stream collection, link policy and failure handling.
+`PathspecEvaluator` owns selection, `scanning-utils.ts` owns filesystem inspection, `GitProcess` owns subprocess mechanics, and `Scanner` owns traversal, sharing and repository discovery. See [scanner contracts](docs/scanning.md) for stream collection, link policy and failure handling.
 
-A complete scan is not a captured snapshot. Commit must remain unavailable until the entire selected snapshot can be produced, including successful file and repository capture. Final backup-tree encoding/collisions, wildcard syntax, capture, durable repository identity and remote storage remain unimplemented.
+A complete scan is not a captured snapshot. `SnapshotStore` gates publication on file/repository capture and final verification. Wildcard pathspec syntax and remote storage remain unimplemented.

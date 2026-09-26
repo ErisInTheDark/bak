@@ -11,6 +11,60 @@ $Documents = C:/Users/Username/Documents
 !#projects/foo/.git
 `
 
+test('repository mounts select their literal source and share exclusions with physical exposures', () => {
+  const evaluator = new PathspecEvaluator(`
+$Work = C:/work
+$Work
+repo:/widget = $Work/feature
+!repo:/widget/out
+`)
+  assert.deepEqual(evaluator.evaluate('C:/work/feature/src/a.ts'), [
+    { kind: 'physical', root: 'C:/', path: 'work/feature/src/a.ts' },
+    { kind: 'repository', path: 'widget/src/a.ts' },
+  ])
+  assert.deepEqual(evaluator.evaluate('C:/work/feature/out/a.js'), [])
+  assert.deepEqual(evaluator.getRepositoryMounts(), [
+    { name: 'widget', source: { root: 'C:/', path: 'work/feature' } },
+  ])
+})
+
+test('bound worktrees are independent roots with shared dynamic exclusions', () => {
+  const evaluator = new PathspecEvaluator(`
+repo:/widget = C:/work/widget
+!repo:/widget+feature/cache
+`).bindRepositories([
+    { name: 'widget+feature', source: { root: 'D:/', path: 'feature' } },
+  ])
+  assert.deepEqual(evaluator.evaluate('D:/feature/src/a.ts'), [
+    { kind: 'repository', path: 'widget+feature/src/a.ts' },
+  ])
+  assert.deepEqual(evaluator.evaluate('D:/feature/cache/item'), [])
+})
+
+test('dynamic exclusions can precede later ordinary inclusions', () => {
+  const evaluator = new PathspecEvaluator(`
+repo:/widget = C:/work/widget
+!repo:/widget+feature/cache
+C:/work/widget/keep
+C:/other
+`).bindRepositories([{ name: 'widget+feature', source: { root: 'D:/', path: 'feature' } }])
+  assert.deepEqual(evaluator.evaluate('C:/other/file'), [
+    { kind: 'physical', root: 'C:/', path: 'other/file' },
+  ])
+  assert.deepEqual(evaluator.evaluate('D:/feature/cache/file'), [])
+})
+
+test('compiled worktree bindings do not retain caller-mutable path objects', () => {
+  const source = { root: 'D:/', path: 'feature' }
+  const bindings = [{ name: 'widget+feature', source }]
+  const evaluator = new PathspecEvaluator('repo:/widget = C:/widget').bindRepositories(bindings)
+  source.path = 'changed'
+  bindings[0]!.name = 'widget+changed'
+  assert.deepEqual(evaluator.evaluate('D:/feature/file'), [
+    { kind: 'repository', path: 'widget+feature/file' },
+  ])
+})
+
 test('the complete selection example excludes documents but restores the aliased project', () => {
   const evaluator = new PathspecEvaluator(example)
   const select = (suffix: string) => evaluator.evaluate(`C:/Users/Username/${suffix}`)

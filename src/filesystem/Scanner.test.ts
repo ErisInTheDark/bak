@@ -1,33 +1,132 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
-import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { devNull, tmpdir } from 'node:os'
+import GitFixture from '../testing/GitFixture.ts'
+import { link, mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { promisify } from 'node:util'
 import PathspecEvaluator from '../config/PathspecEvaluator.ts'
 import Scanner, { type ScanRecord } from './Scanner.ts'
 import { nativePath, scanningIO, sourcePath } from './scanning-utils.ts'
 
-const execute = promisify(execFile)
+const git = GitFixture.runGit
+
+test('named repositories suppress matching clones before any content is emitted', async () => {
+  const f = await GitFixture.create()
+  try {
+    const unnamed = await f.repository('first')
+    const named = await f.repository('last')
+    const nested = await f.repository('first/nested')
+    for (const path of [unnamed, named]) await f.git(['remote', 'add', 'origin', 'ssh://host/widget'], path)
+    await f.write('first/sub/file', 'unnamed contents')
+    await symlink(f.path('first/sub'), f.path('linked-subtree'), process.platform === 'win32' ? 'junction' : 'dir')
+    const records = await collect(new Scanner(new PathspecEvaluator(`
+${rule(f.root)}
+${rule(join(unnamed, 'file.txt'))}
+repo:/chosen = ${rule(named)}
+repo:/nested = ${rule(nested)}
+`)).scan())
+    assert.equal(completion(records).complete, true)
+    assert.ok(records.some(record => record.type === 'skipped'))
+    assert.ok(!records.some(record => record.type === 'entry' &&
+      nativePath(record.source).startsWith(nativePath(sourcePath(unnamed))) &&
+      !nativePath(record.source).startsWith(nativePath(sourcePath(nested)))))
+    assert.ok(records.some(record => record.type === 'entry' &&
+      nativePath(record.source) === nativePath(sourcePath(join(named, 'file.txt')))))
+    assert.ok(records.some(record => record.type === 'entry' &&
+      nativePath(record.source) === nativePath(sourcePath(join(nested, 'file.txt')))))
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('literal linked-worktree mounts include siblings with dynamic exclusions', async () => {
+  const f = await GitFixture.create()
+  try {
+    const main = await f.repository('main')
+    const feature = f.path('feature')
+    const sibling = f.path('sibling')
+    await f.git(['worktree', 'add', '-b', 'feature', feature], main)
+    await f.git(['worktree', 'add', '-b', 'sibling', sibling], main)
+    await f.write('sibling/cache/ignored', 'excluded')
+    const records = await collect(new Scanner(new PathspecEvaluator(`
+repo:/widget = ${rule(feature)}
+!repo:/widget+sibling/cache
+`)).scan())
+    assert.equal(completion(records).complete, true)
+    const roots = records.filter(record => record.type === 'root')
+    assert.ok(roots.some(record => record.destination.kind === 'repository' && record.destination.path === 'widget'))
+    assert.ok(roots.some(record => record.destination.kind === 'repository' && record.destination.path === 'widget+sibling'))
+    assert.ok(!roots.some(record => record.destination.path === 'widget+feature'))
+    assert.ok(!records.some(record => record.type === 'entry' && nativePath(record.source) === nativePath(sourcePath(main))))
+    assert.ok(!records.some(record => record.type === 'entry' &&
+      nativePath(record.source) === nativePath(sourcePath(join(sibling, 'cache', 'ignored')))))
+    const base = roots.find(record => record.destination.path === 'widget')
+    assert.ok(records.some(record => record.type === 'entry' && record.id === base?.id &&
+      nativePath(record.source) === nativePath(sourcePath(feature))))
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('ordinary repository discovery includes registered worktrees outside selected roots', async () => {
+  const f = await GitFixture.create()
+  try {
+    const main = await f.repository('main')
+    const external = f.path('elsewhere')
+    await f.git(['worktree', 'add', '-b', 'feature', external], main)
+    const records = await collect(new Scanner(new PathspecEvaluator(rule(main))).scan())
+    assert.equal(completion(records).complete, true)
+    assert.ok(records.some(record => record.type === 'entry' &&
+      nativePath(record.source) === nativePath(sourcePath(join(external, 'file.txt')))))
+    assert.ok(records.some(record => record.type === 'repository' &&
+      nativePath(record.source) === nativePath(sourcePath(external))))
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('missing registered worktrees fail unless explicitly excluded', async () => {
+  const f = await GitFixture.create()
+  try {
+    const main = await f.repository('main')
+    const feature = f.path('feature')
+    await f.git(['worktree', 'add', '-b', 'feature', feature], main)
+    await rename(feature, f.path('offline'))
+    const declaration = `repo:/project = ${rule(main)}`
+    const missing = await collect(new Scanner(new PathspecEvaluator(declaration)).scan())
+    assert.equal(completion(missing).complete, false)
+    const excluded = await collect(new Scanner(new PathspecEvaluator(`${declaration}\n!repo:/project+feature`)).scan())
+    assert.equal(completion(excluded).complete, true)
+    assert.ok(!excluded.some(record => record.type === 'root' && record.destination.path === 'project+feature'))
+  } finally {
+    await f.dispose()
+  }
+})
+
+test('repository storage identity resolves administrative directory junctions', async () => {
+  const f = await GitFixture.create()
+  try {
+    const source = await f.repository('source')
+    const storage = f.path('storage.git')
+    await rename(f.path('source/.git'), storage)
+    await symlink(storage, f.path('source/.git'), process.platform === 'win32' ? 'junction' : 'dir')
+    const records = await collect(new Scanner(new PathspecEvaluator(`repo:/source = ${rule(source)}`)).scan())
+    assert.equal(completion(records).complete, true)
+    const repository = records.find(record => record.type === 'repository')
+    assert.ok(repository)
+    assert.deepEqual(repository.commonDirectory, sourcePath(storage))
+    assert.deepEqual(repository.gitDirectory, sourcePath(storage))
+  } finally {
+    await f.dispose()
+  }
+})
 
 async function fixture(run: (root: string) => Promise<void>) {
-  const root = await mkdtemp(join(tmpdir(), 'bak-scan-'))
+  const fixture = await GitFixture.create()
   try {
-    await run(root)
+    await run(fixture.root)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await fixture.dispose()
   }
-}
-
-async function git(cwd: string, ...args: string[]) {
-  return (await execute('git', args, {
-    cwd, windowsHide: true,
-    env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_'))),
-      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : devNull,
-      GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
-      GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.invalid' },
-  })).stdout.trim()
 }
 
 const rule = (path: string) => `"${path.replaceAll('\\', '/')}"`
@@ -338,8 +437,6 @@ test('iterator return cancels an awaited Git query without timers or a surviving
       },
     })
     const iterator = scanner.scan()
-    await iterator.next() // root
-    await iterator.next() // directory
     const next = iterator.next()
     await queryStarted
     const returned = iterator.return()

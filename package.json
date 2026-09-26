@@ -7,6 +7,7 @@
   },
   "packageManager": "pnpm@11.22.0",
   "scripts": {
+    "bak": "tsx src/cli.ts",
     "test": "tsx scripts/test.ts",
     "typecheck": "tsc --noEmit"
   },

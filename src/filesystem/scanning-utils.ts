@@ -1,8 +1,7 @@
-import { execFile } from 'node:child_process'
-import { lstat, opendir, readlink, realpath, stat } from 'node:fs/promises'
-import { devNull } from 'node:os'
+import { lstat, opendir, readFile, readlink, realpath, stat } from 'node:fs/promises'
+import type { BigIntStats } from 'node:fs'
 import { basename, dirname, isAbsolute, parse, resolve, sep } from 'node:path'
-import { promisify } from 'node:util'
+import GitProcess from '../git/GitProcess.ts'
 import type { PhysicalPath } from '../config/PathspecEvaluator.ts'
 
 export interface Metadata {
@@ -13,6 +12,30 @@ export interface Metadata {
   readonly size: string
   readonly mtimeNs: string
   readonly ctimeNs: string
+}
+
+export namespace Metadata {
+  export function is(value: unknown): value is Metadata {
+    if (!value || typeof value !== 'object') return false
+    const data = value as Record<string, unknown>
+    return Number.isSafeInteger(data.mode) && Number(data.mode) >= 0 &&
+      ['device', 'inode', 'links', 'size'].every(key => typeof data[key] === 'string' && /^\d+$/.test(data[key])) &&
+      ['mtimeNs', 'ctimeNs'].every(key => typeof data[key] === 'string' && /^-?\d+$/.test(data[key]))
+  }
+
+  export function fromStats(stats: BigIntStats): Metadata {
+    return {
+      device: String(stats.dev), inode: String(stats.ino), links: String(stats.nlink),
+      mode: Number(stats.mode), size: String(stats.size),
+      mtimeNs: String(stats.mtimeNs), ctimeNs: String(stats.ctimeNs),
+    }
+  }
+
+  export function unchanged(first: Metadata, second: Metadata): boolean {
+    return first.device === second.device && first.inode === second.inode &&
+      first.links === second.links && first.mode === second.mode && first.size === second.size &&
+      first.mtimeNs === second.mtimeNs && first.ctimeNs === second.ctimeNs
+  }
 }
 
 export interface Inspection {
@@ -28,7 +51,8 @@ export interface ScanningIO {
   exists(path: PhysicalPath): Promise<boolean>
   resolveRule(path: PhysicalPath): Promise<PhysicalPath>
   children(path: PhysicalPath): AsyncIterable<string>
-  git(args: readonly string[], cwd: PhysicalPath, signal?: AbortSignal): Promise<string>
+  git(args: readonly string[], cwd: PhysicalPath, signal?: AbortSignal, acceptExitCodes?: readonly number[]): Promise<string>
+  readText(path: PhysicalPath): Promise<string>
 }
 
 export function nativePath(path: PhysicalPath): string {
@@ -86,15 +110,7 @@ async function inspect(path: PhysicalPath): Promise<Inspection> {
     source: sourcePath(canonical),
     id: `${stats.dev}:${stats.ino}`,
     kind: stats.isDirectory() ? 'directory' : 'file',
-    metadata: {
-      device: String(stats.dev),
-      inode: String(stats.ino),
-      links: String(stats.nlink),
-      mode: Number(stats.mode),
-      size: String(stats.size),
-      mtimeNs: String(stats.mtimeNs),
-      ctimeNs: String(stats.ctimeNs),
-    },
+    metadata: Metadata.fromStats(stats),
     ...(symbolic ? { symbolic } : {}),
   }
 }
@@ -139,24 +155,16 @@ export async function* directoryNames(
   }
 }
 
-const execute = promisify(execFile)
-
-async function git(args: readonly string[], cwd: PhysicalPath, signal?: AbortSignal): Promise<string> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')))
-  const result = await execute('git', [...args], {
+async function git(
+  args: readonly string[], cwd: PhysicalPath, signal?: AbortSignal, acceptExitCodes?: readonly number[],
+): Promise<string> {
+  const result = await new GitProcess().run(args, {
     cwd: nativePath(cwd),
-    env: {
-      ...env,
-      GIT_OPTIONAL_LOCKS: '0',
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : devNull,
-    },
-    windowsHide: true,
-    maxBuffer: 1024 * 1024,
     ...(signal ? { signal } : {}),
+    ...(acceptExitCodes ? { acceptExitCodes } : {}),
   })
-  return result.stdout.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '')
+  return new TextDecoder('utf-8', { fatal: true }).decode(result.stdout)
+    .replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '')
 }
 
 async function exists(path: PhysicalPath): Promise<boolean> {
@@ -169,4 +177,7 @@ async function exists(path: PhysicalPath): Promise<boolean> {
   }
 }
 
-export const scanningIO: ScanningIO = { inspect, exists, resolveRule, children: directoryNames, git }
+export const scanningIO: ScanningIO = {
+  inspect, exists, resolveRule, children: directoryNames, git,
+  readText: async path => new TextDecoder('utf-8', { fatal: true }).decode(await readFile(nativePath(path))),
+}

@@ -28,6 +28,9 @@ Collecting is optional. Consumers can process records incrementally. A completio
 | `entry` | File/directory content identity, canonical source path and inspection metadata. No file bytes. |
 | `link` | Named edge from a directory to an entry ID. Relationship is ordinary membership, symbolic link or additional hardlink name. |
 | `repository` | Entry's working-tree location, Git directory, common directory, bare status and object format. Administrative-only selections have no working tree. |
+| `mount` | Validated explicit repository name, literal source and shared Git directory. |
+| `worktree-root` | Automatically included linked-worktree entry. Snapshot naming resolves its canonical destination from the complete repository inventory. |
+| `skipped` | Unnamed clone omitted as a whole subtree, with the explicit named copies causing that decision. |
 | `problem` | Source, operation, message and available error code. The run cannot finish complete. |
 | `completion` | Complete/incomplete, cancelled flag and entry/repository/problem counts. |
 
@@ -63,7 +66,11 @@ Recognised administrative storage is not flattened into ordinary file entries. B
 
 Excluding `.git` disables repository treatment for that working directory across its exposures. Malformed markers, unsupported Git responses and query failures produce problems. Independent working paths continue.
 
-Queries run without a shell or inherited repository-location/configuration overrides. Global/system Git configuration is disabled; repository configuration remains available to Git's own metadata queries. No refs, index or source contents are modified.
+Named mounts are resolved before traversal. Repository-family selection runs before entry emission, preventing skipped clones from leaking files into the graph. Source folder names and canonical naming collisions are resolved by snapshot construction, not traversal order.
+
+Repository records include the configured origin address and registered linked-worktree locations. Exact-origin matching never contacts remotes or expands URL rewrite rules. Registered worktrees are selected automatically, subject to exclusions; missing selected worktrees invalidate completion.
+
+Queries run without a shell or inherited repository-location/configuration overrides. `GitProcess` disables global/system configuration, hooks, automatic maintenance and lazy fetching. Repository configuration remains available to metadata queries. No refs, index or source contents are modified.
 
 Repository records describe discovery only. They do not claim objects, refs, reflogs, hooks, metadata or dirty contents have been captured.
 
@@ -81,4 +88,4 @@ Only a terminal complete result means discovery succeeded. File bytes and reposi
 
 Run `pnpm test` and `pnpm typecheck`. Scanner tests create isolated temporary Git/filesystem fixtures and remove only those fixtures. They cover shared selection, link references/materialisation, repository boundaries, failure continuation and cancellation without timer races. Windows uses real junctions and hardlinks; the file-symbolic-link policy test injects resolved link metadata at the filesystem boundary.
 
-The current validation host is Windows. Linux behaviour requires a separate run. No source backup or restore operation is exercised because those operations do not exist yet.
+The current validation host is Windows. Linux behaviour requires a separate run. Snapshot integration tests additionally exercise capture and source-independent readback; there is no filesystem restore command.
