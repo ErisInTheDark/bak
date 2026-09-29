@@ -47,7 +47,8 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
       identity = { name, email }
     }
     const result = await new SnapshotStore(context.root).commit({
-      pathspec: new TextDecoder('utf-8', { fatal: true }).decode(await readFile(join(context.root, 'bak.pathspec'))),
+      pathspec: new TextDecoder('utf-8', { fatal: true }).decode(
+        await readFile(join(context.root, SnapshotStore.pathspecFileName))),
       message: context.message, identity,
       ...(context.relocate ? { relocate: context.relocate } : {}),
       ...(context.signal ? { signal: context.signal } : {}),

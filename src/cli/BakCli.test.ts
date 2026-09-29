@@ -17,7 +17,7 @@ test('backup commands initialise, capture, list and read without mixing diagnost
     const prefix = ['--root', fixture.path('backup')]
     assert.equal(await cli.run([...prefix, 'init']), 0)
     const file = await fixture.write('source/file', Buffer.from([0, 255, 13, 10]))
-    await fixture.write('backup/bak.pathspec', `#file = "${file}"`)
+    await fixture.write('backup/.bakspec', `#file = "${file}"`)
     assert.equal(await cli.run([...prefix, 'commit', '-m', 'first', '--author', 'fixture <fixture@example.invalid>']), 0)
     output.length = 0
     assert.equal(await cli.run([...prefix, 'log']), 0)

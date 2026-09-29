@@ -24,7 +24,7 @@ const bytes = await reader.read(result.commit, 'repo:/widget/file.txt')
 
 ````text
 backup/
-  bak.pathspec
+  .bakspec
   .bak/
     main.git
     repos/<stable-id>.git
@@ -45,7 +45,7 @@ repo:/widget = D:/moved/widget
 ````
 
 ````sh
-pnpm bak --root C:/backup commit --relocate repo:/widget -m "moved widget"
+bak --root C:/backup commit --relocate repo:/widget -m "moved widget"
 ````
 
 Old and new locations cannot both claim that identity. Relocation does not change object format, move files or rewrite earlier snapshots.

@@ -35,6 +35,8 @@ interface CapturedRepositoryState {
 }
 
 export default class SnapshotStore {
+  static readonly pathspecFileName = '.bakspec'
+
   constructor(readonly root: string, readonly git = new GitProcess()) {}
 
   async init(signal?: AbortSignal): Promise<void> {
@@ -61,7 +63,10 @@ export default class SnapshotStore {
     }
     await this.#checkStorage(signal)
     try {
-      await writeFile(join(this.root, 'bak.pathspec'), '', { flag: 'wx' })
+      await writeFile(join(this.root, SnapshotStore.pathspecFileName),
+        '# Add source paths to back up, one per line.\n' +
+        '# Example: "C:/Users/you/Documents" or "/home/you/Documents"\n',
+        { flag: 'wx' })
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') throw error
     }

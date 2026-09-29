@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { link, mkdir, rename, symlink, unlink } from 'node:fs/promises'
 import { test } from 'node:test'
+import PathspecEvaluator from '../config/PathspecEvaluator.ts'
 import GitFixture from '../testing/GitFixture.ts'
 import SnapshotReader from './SnapshotReader.ts'
 import SnapshotStore from './SnapshotStore.ts'
@@ -54,16 +55,19 @@ test('failed selection cannot replace a published snapshot', async () => {
   }
 })
 
-test('initialisation never overwrites an existing pathspec', async () => {
+test('initialisation creates a selection file without overwriting an existing one', async () => {
   const fixture = await GitFixture.create()
   try {
     const root = fixture.path('backup')
     await mkdir(root)
-    await fixture.write('backup/bak.pathspec', '# user-owned selection\n')
     const store = new SnapshotStore(root)
     await store.init()
     const { readFile } = await import('node:fs/promises')
-    assert.equal(await readFile(fixture.path('backup/bak.pathspec'), 'utf8'), '# user-owned selection\n')
+    const starter = await readFile(fixture.path('backup/.bakspec'), 'utf8')
+    assert.equal(new PathspecEvaluator(starter).getScanRoots().length, 0)
+    await fixture.write('backup/.bakspec', '# user-owned selection\n')
+    await store.init()
+    assert.equal(await readFile(fixture.path('backup/.bakspec'), 'utf8'), '# user-owned selection\n')
   } finally {
     await fixture.dispose()
   }

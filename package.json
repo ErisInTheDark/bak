@@ -5,15 +5,27 @@
   "engines": {
     "node": ">=22.22.1"
   },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "26.9.0",
+      "onFail": "download"
+    }
+  },
   "packageManager": "pnpm@11.22.0",
+  "bin": {
+    "bak": "./bin/bak.mjs"
+  },
   "scripts": {
     "bak": "tsx src/cli.ts",
     "test": "tsx scripts/test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "tsx": "^4.23.13"
+  },
   "devDependencies": {
     "@types/node": "^22.20.1",
-    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
 }

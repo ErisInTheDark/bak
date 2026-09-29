@@ -4,13 +4,17 @@ Git-native filesystem backup utility, under development. Creates local snapshots
 
 ## local snapshots
 
+Register this checkout's CLI once with `vp install -g .`. In any backup folder:
+
 ````sh
-pnpm bak --root C:/backups/personal init
-# edit C:/backups/personal/bak.pathspec
-pnpm bak --root C:/backups/personal commit -m "first backup"
-pnpm bak --root C:/backups/personal log
-pnpm bak --root C:/backups/personal show HEAD repo:/widget/src/index.ts
+bak init
+# edit .bakspec to select source paths
+bak commit -m "first backup"
+bak log
+bak show HEAD repo:/widget/src/index.ts
 ````
+
+`bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Existing backups using `bak.pathspec` need a one-time manual rename to `.bakspec` before their next commit; the stored history remains in `.bak`. This development version has no remote setup or sync.
 
 Commit captures the entire pathspec; there is no staging command. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `show <snapshot>` lists the snapshot root; supplying a file path streams its bytes.
 
@@ -20,7 +24,7 @@ See [snapshot contracts and limits](docs/snapshots.md) before relying on this de
 
 ## development
 
-Requires Node.js 22.22.1+ and pnpm 11.22.0.
+Requires Node.js 22.22.1+ and pnpm 11.22.0. `vp` pins development to Node.js 26.9.0 and pnpm 11.22.0.
 
 ````sh
 pnpm install
