@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@inthedark/wb':
+        specifier: ^0.0.8
+        version: 0.0.8
       tsx:
         specifier: ^4.23.13
         version: 4.23.13
@@ -180,6 +183,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@inthedark/wb@0.0.8':
+    resolution: {integrity: sha512-JMoXHfkBykFU7DGrvnabjEwmdspNWjPtCBjf33vxkFlH0PNclDmyRnxLLoK1m/yKZoxvpqeVlOO4gICooouXzA==}
+    engines: {node: '>=22.13.0'}
+    hasBin: true
+
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
 
@@ -302,6 +310,11 @@ packages:
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [win32]
+
+  dotenv@18.0.6:
+    resolution: {integrity: sha512-ZMVmohV6CvAJtj++pZNyggluUt6hbRdQAxc2+Z635RL6/AG/ruXv5lHnybUFoxMPL/yrTL/tsF4paZu2l7RA6Q==}
+    engines: {node: '>=12'}
+    hasBin: true
 
   esbuild@0.28.2:
     resolution: {integrity: sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==}
@@ -538,6 +551,10 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
+  '@inthedark/wb@0.0.8':
+    dependencies:
+      dotenv: 18.0.6
+
   '@types/node@22.20.1':
     dependencies:
       undici-types: 6.21.0
@@ -601,6 +618,8 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
+
+  dotenv@18.0.6: {}
 
   esbuild@0.28.2:
     optionalDependencies:

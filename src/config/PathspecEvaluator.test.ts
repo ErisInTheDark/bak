@@ -11,6 +11,42 @@ $Documents = C:/Users/Username/Documents
 !#projects/foo/.git
 `
 
+test('the remote setting is parsed without affecting selection', () => {
+  const plain = new PathspecEvaluator('C:/data\n!C:/data/cache\n')
+  const configured = new PathspecEvaluator('@remote = b2://my-bak-bucket/personal\nC:/data\n!C:/data/cache\n')
+  assert.equal(plain.getRemote(), undefined)
+  assert.deepEqual(configured.getRemote(), { backend: 'b2', bucket: 'my-bak-bucket', prefix: 'personal' })
+  assert.deepEqual(configured.getScanRoots(), plain.getScanRoots())
+  assert.deepEqual(configured.evaluate('C:/data/a.txt'), plain.evaluate('C:/data/a.txt'))
+  assert.deepEqual(configured.evaluate('C:/data/cache/a.txt'), [])
+})
+
+test('environment overrides are collected without affecting selection', () => {
+  const plain = new PathspecEvaluator('C:/data\n')
+  const configured = new PathspecEvaluator(
+    '@env.B2_APPLICATION_KEY_ID = ${wb:B2_APPLICATION_KEY_ID_1}\n@env.QUOTED = "a=b # c"\nC:/data\n',
+  )
+  assert.deepEqual(plain.getEnvironment(), {})
+  assert.deepEqual(configured.getEnvironment(), { B2_APPLICATION_KEY_ID: '${wb:B2_APPLICATION_KEY_ID_1}', QUOTED: 'a=b # c' })
+  assert.deepEqual(configured.getScanRoots(), plain.getScanRoots())
+})
+
+test('invalid settings fail with their line number', () => {
+  for (const text of [
+    'C:/data\n@remot = b2://my-bak-bucket',
+    'C:/data\n@remote',
+    'C:/data\n@remote = s3://my-bak-bucket',
+    '@remote = b2://my-bak-bucket\n@remote = b2://other-bucket',
+    'C:/data\n@env.B2_KEY',
+    'C:/data\n@env.1BAD = value',
+    'C:/data\n@env. = value',
+    'C:/data\n@env.WB_STORES = evil: rm {key}',
+    '@env.B2_KEY = one\n@env.B2_KEY = two',
+  ]) {
+    assert.throws(() => new PathspecEvaluator(text), /^Error: line 2: /u, text)
+  }
+})
+
 test('repository mounts select their literal source and share exclusions with physical exposures', () => {
   const evaluator = new PathspecEvaluator(`
 $Work = C:/work

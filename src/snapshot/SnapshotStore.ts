@@ -65,7 +65,8 @@ export default class SnapshotStore {
     try {
       await writeFile(join(this.root, SnapshotStore.pathspecFileName),
         '# Add source paths to back up, one per line.\n' +
-        '# Example: "C:/Users/you/Documents" or "/home/you/Documents"\n',
+        '# Example: "C:/Users/you/Documents" or "/home/you/Documents"\n' +
+        '# Remote storage: @remote = b2://bucket/prefix\n',
         { flag: 'wx' })
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') throw error

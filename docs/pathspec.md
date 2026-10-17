@@ -34,6 +34,13 @@ Results:
 - Explicit subtree re-inclusion restores that subtree across currently visible shared parent views, whether written through a physical path or an alias. Entirely removed root exposures stay removed unless explicitly exposed again.
 - Multiple destinations are allowed. Identical destinations are deduplicated.
 
+## settings
+
+`@name = value` configures the backup folder without selecting anything. Unknown names, missing values and repeated settings fail with line numbers.
+
+- `@remote = b2://bucket[/prefix]` names the Backblaze B2 bucket and optional key prefix for remote storage. Folders can share a bucket through different prefixes. `getRemote()` returns `{ backend, bucket, prefix }` or `undefined`.
+- `@env.NAME = value` overrides one checkout `.env` value for this folder when remote credentials load. Values may contain `${wb:KEY}` references, resolved from the checkout's store. Quote values containing `=` or `# `. Names follow `[A-Za-z_][A-Za-z0-9_]*`; `WB_STORES` is rejected so backup folders cannot choose store commands. `getEnvironment()` returns the overrides as a record.
+
 ## repository mounts
 
 ````text

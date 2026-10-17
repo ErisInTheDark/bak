@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import FixtureDirectory from '../src/testing/FixtureDirectory.ts'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const runner = fileURLToPath(new URL('./test.ts', import.meta.url))
 
 async function probe(sources: string[], args: string[] = []) {
-  const directory = await mkdtemp(join(tmpdir(), 'bak-runner-'))
+  const fixture = await FixtureDirectory.create('bak-runner-')
+  const directory = fixture.path
   try {
     const files = await Promise.all(sources.map(async (source, index) => {
       const path = join(directory, `${index}.test.ts`)
@@ -35,8 +36,7 @@ async function probe(sources: string[], args: string[] = []) {
       child.once('close', code => resolve({ code, stdout, stderr }))
     })
   } finally {
-    // Only remove the unique temporary directory created by this invocation.
-    await rm(directory, { recursive: true, force: true })
+    await fixture.dispose()
   }
 }
 

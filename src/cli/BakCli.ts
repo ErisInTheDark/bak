@@ -1,11 +1,16 @@
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Writable } from 'node:stream'
 import { parseArgs } from 'node:util'
+import loadEnvironment from '../config/load-environment.ts'
+import PathspecEvaluator from '../config/PathspecEvaluator.ts'
+import RemoteLocation from '../config/RemoteLocation.ts'
 import GitProcess, { type GitIdentity } from '../git/GitProcess.ts'
 import { nativePath } from '../filesystem/scanning-utils.ts'
 import SnapshotReader from '../snapshot/SnapshotReader.ts'
 import SnapshotStore from '../snapshot/SnapshotStore.ts'
+import B2ObjectStore from '../storage/b2/B2ObjectStore.ts'
 
 export interface CliOutput {
   readonly stdout: Writable
@@ -20,6 +25,10 @@ interface CommandContext {
   readonly author?: string
   readonly relocate?: readonly string[]
   readonly signal?: AbortSignal
+}
+
+async function readPathspec(root: string): Promise<string> {
+  return new TextDecoder('utf-8', { fatal: true }).decode(await readFile(join(root, SnapshotStore.pathspecFileName)))
 }
 
 const commands: Readonly<Record<string, (context: CommandContext) => Promise<void>>> = {
@@ -47,8 +56,7 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
       identity = { name, email }
     }
     const result = await new SnapshotStore(context.root).commit({
-      pathspec: new TextDecoder('utf-8', { fatal: true }).decode(
-        await readFile(join(context.root, SnapshotStore.pathspecFileName))),
+      pathspec: await readPathspec(context.root),
       message: context.message, identity,
       ...(context.relocate ? { relocate: context.relocate } : {}),
       ...(context.signal ? { signal: context.signal } : {}),
@@ -92,6 +100,31 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
       context.output.stdout.write(target.children.map(name => `${name}\n`).join(''))
     }
   },
+  remote: async context => {
+    if (context.arguments.length !== 1 || context.arguments[0] !== 'check') throw new Error('remote requires check')
+    const signal = context.signal
+    const evaluator = new PathspecEvaluator(await readPathspec(context.root))
+    const location = evaluator.getRemote()
+    if (!location) throw new Error(`add @remote = b2://bucket[/prefix] to ${SnapshotStore.pathspecFileName}`)
+    const environment = await loadEnvironment({
+      required: B2ObjectStore.environmentNames, overrides: evaluator.getEnvironment(), ...(signal ? { signal } : {}),
+    })
+    const store = B2ObjectStore.fromEnvironment(environment, location)
+    const key = `bak-probe/${randomUUID()}`
+    const bytes = new TextEncoder().encode(`bak remote check ${key}\n`)
+    await store.putImmutable(key, bytes, signal)
+    try {
+      const whole = await store.get(key, signal)
+      const range = await store.getRange(key, { start: 4, end: 10 }, signal)
+      const head = await store.head(key, signal)
+      if (!whole || Buffer.compare(whole, bytes) || Buffer.compare(range, bytes.subarray(4, 10)) || !head || head.size !== bytes.byteLength) {
+        throw new Error(`b2 probe ${key} did not read back what was written`)
+      }
+    } finally {
+      await store.delete(key, signal)
+    }
+    context.output.stdout.write(`authorised for ${RemoteLocation.format(location)}; put/get/range/head/delete ok\n`)
+  },
 }
 
 export default class BakCli {
@@ -110,12 +143,12 @@ export default class BakCli {
         },
       })
       if (values.help) {
-        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path]\n')
+        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path] | remote check\n')
         return 0
       }
       const [command, ...arguments_] = positionals
       const handler = command ? commands[command] : undefined
-      if (!handler) throw new Error('choose init, commit, log or show')
+      if (!handler) throw new Error('choose init, commit, log, show or remote')
       signal?.throwIfAborted()
       await handler({
         root: resolve(values.root ?? process.cwd()), arguments: arguments_, output: this.output,

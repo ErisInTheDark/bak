@@ -1,4 +1,5 @@
 import { PathspecStatement, RepositoryMount } from './pathspec-syntax.ts'
+import RemoteLocation from './RemoteLocation.ts'
 
 export interface PhysicalPath {
   readonly root: string
@@ -64,7 +65,20 @@ interface Compilation {
   program: Program
   destinationsAt(source: PhysicalPath): Destination[]
   resolve(source: PhysicalPath): PhysicalPath
+  settings: Settings
 }
+
+const settingParsers = {
+  remote: RemoteLocation.parse,
+} as const satisfies Record<string, (value: string) => unknown>
+
+type SettingName = keyof typeof settingParsers
+type Settings = { -readonly [Name in SettingName]?: ReturnType<typeof settingParsers[Name]> } & {
+  readonly environment: Map<string, string>
+}
+
+/** Selects the store command that resolves secrets, so it stays owned by the checkout `.env`. */
+const reservedEnvironmentNames = new Set(['WB_STORES'])
 
 type Statement = PathspecStatement
 
@@ -179,6 +193,28 @@ function exposureMapping(destination: string, mappings: ReadonlyMap<string, Phys
 
 const statementHandlers: readonly StatementHandler[] = [
   {
+    matches: ([left]) => left.startsWith('@env.'),
+    compile: ([left, right], context) => {
+      if (right === undefined) throw new Error(`setting ${left} needs = value`)
+      const name = left.slice('@env.'.length)
+      if (!/^[A-Za-z_]\w*$/.test(name)) throw new Error(`invalid environment variable name ${name}`)
+      if (reservedEnvironmentNames.has(name)) throw new Error(`${name} cannot be overridden from a backup folder`)
+      if (context.settings.environment.has(name)) throw new Error(`setting ${left} is already defined`)
+      context.settings.environment.set(name, value(right))
+    },
+  },
+  {
+    matches: ([left]) => left.startsWith('@'),
+    compile: ([left, right], context) => {
+      if (right === undefined) throw new Error(`setting ${left} needs = value`)
+      const name = left.slice(1)
+      if (!Object.hasOwn(settingParsers, name)) throw new Error(`unknown setting ${left}`)
+      const setting = name as SettingName
+      if (context.settings[setting] !== undefined) throw new Error(`setting ${left} is already defined`)
+      context.settings[setting] = settingParsers[setting](value(right))
+    },
+  },
+  {
     matches: ([left, right]) => right !== undefined && left.startsWith('$'),
     compile: ([left, right], context) => {
       if (!/^\$[a-zA-Z_]\w*$/.test(left)) throw new Error('invalid variable name')
@@ -289,6 +325,7 @@ export default class PathspecEvaluator {
   readonly #sources: PhysicalPath[] = []
   readonly #text: string
   readonly #mounts: RepositoryMount[] = []
+  readonly #settings: Settings = { environment: new Map() }
   readonly #repositoryBindings: readonly RepositoryMount[] | undefined
   #deferred = false
 
@@ -303,6 +340,7 @@ export default class PathspecEvaluator {
       repositories: new Map(),
       repositoryBindings: this.#repositoryBindings,
       mounts: this.#mounts,
+      settings: this.#settings,
       defer: () => { this.#deferred = true },
       program: this.#program,
       destinationsAt: source => this.#evaluate(source),
@@ -322,7 +360,7 @@ export default class PathspecEvaluator {
         if (!left && right === undefined) continue
         const parsed: Statement = right === undefined ? [left] : [left, right]
         const handler = statementHandlers.find(handler => handler.matches(parsed))
-        if (!handler) throw new Error('only variables, aliases and repository mounts can be assigned')
+        if (!handler) throw new Error('only variables, aliases, repository mounts and settings can be assigned')
         handler.compile(parsed, context)
       } catch (error) {
         if (!(error instanceof Error)) throw error
@@ -377,6 +415,15 @@ export default class PathspecEvaluator {
 
   bindSources(bindings: readonly SourceBinding[]): PathspecEvaluator {
     return new PathspecEvaluator(this.#text, bindings, this.#repositoryBindings)
+  }
+
+  getRemote(): RemoteLocation | undefined {
+    return this.#settings.remote
+  }
+
+  /** `@env.NAME` overrides, layered over the checkout `.env` when loading remote credentials. */
+  getEnvironment(): Record<string, string> {
+    return Object.fromEntries(this.#settings.environment)
   }
 
   getRepositoryMounts(): RepositoryMount[] {

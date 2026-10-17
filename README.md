@@ -14,13 +14,43 @@ bak log
 bak show HEAD repo:/widget/src/index.ts
 ````
 
-`bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Existing backups using `bak.pathspec` need a one-time manual rename to `.bakspec` before their next commit; the stored history remains in `.bak`. This development version has no remote setup or sync.
+`bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Existing backups using `bak.pathspec` need a one-time manual rename to `.bakspec` before their next commit; the stored history remains in `.bak`. Remote storage can be connected and checked, but snapshots are not pushed or fetched yet.
 
 Commit captures the entire pathspec; there is no staging command. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `show <snapshot>` lists the snapshot root; supplying a file path streams its bytes.
 
-Snapshots retain their objects locally without automatic eviction. No remote storage, encryption, restore command, live projection or mounted historical view exists yet. Local Git objects are not encrypted by bak. Protect the backup directory appropriately.
+Snapshots retain their objects locally without automatic eviction. No push/fetch, encryption, restore command, live projection or mounted historical view exists yet. Local Git objects are not encrypted by bak. Protect the backup directory appropriately.
 
 See [snapshot contracts and limits](docs/snapshots.md) before relying on this development version. Source-change checks are not an atomic filesystem snapshot, and platform metadata coverage is limited.
+
+## remote storage
+
+Remote storage uses Backblaze B2, the only supported backend. B2 application keys are shared: copy `.env.example` to `.env` in this bak checkout, next to `package.json`. Values may reference Workbench's secret store, configured for this checkout folder (settings > projects & folders > environment > store); without Workbench, `.env` loads like plain dotenv. Existing environment variables win over `.env`.
+
+````dotenv
+B2_APPLICATION_KEY_ID=${wb:B2_APPLICATION_KEY_ID}
+B2_APPLICATION_KEY=${wb:B2_APPLICATION_KEY}
+````
+
+Each backup folder chooses its destination in `.bakspec`. A prefix lets several folders share one bucket and one bucket-restricted key. See [settings](docs/pathspec.md#settings).
+
+````text
+@remote = b2://my-bak-bucket/personal
+````
+
+A folder can override any checkout `.env` value, for example to use a more specific key. References resolve from the checkout's store. Ambient environment variables win over `@env`, which wins over `.env`.
+
+````text
+@env.B2_APPLICATION_KEY_ID = ${wb:B2_APPLICATION_KEY_ID_1}
+@env.B2_APPLICATION_KEY = ${wb:B2_APPLICATION_KEY_1}
+````
+
+````sh
+bak remote check
+````
+
+`remote check` writes, reads, range-reads and deletes one `bak-probe/<uuid>` object. The key needs list buckets, read, write and delete file capabilities. Credentials load only for `remote` commands and never enter `process.env`, so Git subprocesses do not inherit them. Store lookups run from the checkout folder regardless of `--root` or the current directory.
+
+`ObjectStore` is the storage boundary; `B2ObjectStore` implements it over the B2 native API. Objects are immutable: repeating identical bytes is a no-op, different bytes under an existing key reject. Uploads are single requests (B2 limit 5 GB). Conditional writes for ref publication are not implemented.
 
 ## development
 
@@ -32,7 +62,7 @@ pnpm test
 pnpm typecheck
 ````
 
-Dependency build scripts for esbuild are disabled. tsx uses the installed platform binary.
+Dependency build scripts for esbuild are disabled. tsx uses the installed platform binary. `@inthedark/wb` is excluded from pnpm's minimum release age.
 
 Tests execute through `node:test`. The project-owned runner controls discovery, configuration, reporting and exit status, not test execution.
 
@@ -52,7 +82,7 @@ Compact output reports one totals line, with failing-test errors and locations. 
 
 No test files, no executed tests (including all skipped/TODO or unmatched filters), test failures and runner/load errors produce exit code 1. A successful executed suite produces exit code 0.
 
-Tests create isolated fixtures under the OS temporary directory and remove only their own fixtures. Scanner fixtures include Git repositories, commits, linked worktrees, junctions and hardlinks. Tests require system Git. Tests and typechecking emit no build output.
+Tests create isolated fixtures under the gitignored `.tmp/fixtures` and remove only their own fixtures. Git fixture commands cannot discover this checkout's repository. Scanner fixtures include Git repositories, commits, linked worktrees, junctions and hardlinks. Tests require system Git. Tests and typechecking emit no build output.
 
 ## path selection
 
@@ -80,4 +110,4 @@ for await (const record of scanner.scan()) {
 
 `PathspecEvaluator` owns selection, `scanning-utils.ts` owns filesystem inspection, `GitProcess` owns subprocess mechanics, and `Scanner` owns traversal, sharing and repository discovery. See [scanner contracts](docs/scanning.md) for stream collection, link policy and failure handling.
 
-A complete scan is not a captured snapshot. `SnapshotStore` gates publication on file/repository capture and final verification. Wildcard pathspec syntax and remote storage remain unimplemented.
+A complete scan is not a captured snapshot. `SnapshotStore` gates publication on file/repository capture and final verification. Wildcard pathspec syntax and snapshot push/fetch remain unimplemented.

@@ -1,16 +1,20 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import FixtureDirectory from './FixtureDirectory.ts'
 
 const execute = promisify(execFile)
 
 export default class GitFixture {
-  private constructor(readonly root: string) {}
+  private constructor(private readonly directory: FixtureDirectory) {}
+
+  get root(): string {
+    return this.directory.path
+  }
 
   static async create(): Promise<GitFixture> {
-    return new GitFixture(await realpath(await mkdtemp(join(tmpdir(), 'bak-fixture-'))))
+    return new GitFixture(await FixtureDirectory.create('bak-fixture-'))
   }
 
   path(...parts: string[]): string {
@@ -46,6 +50,7 @@ export default class GitFixture {
         GIT_COMMITTER_NAME: 'fixture',
         GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
         GIT_TERMINAL_PROMPT: '0',
+        GIT_CEILING_DIRECTORIES: FixtureDirectory.root,
       },
     })
     return result.stdout.trimEnd()
@@ -60,13 +65,7 @@ export default class GitFixture {
     return path
   }
 
-  async dispose(): Promise<void> {
-    const actual = await realpath(this.root)
-    const parent = await realpath(tmpdir())
-    if (actual !== this.root || !actual.startsWith(parent + sep) ||
-      !relative(parent, actual).startsWith('bak-fixture-') || relative(parent, actual).includes(sep)) {
-      throw new Error('refusing cleanup outside the owned fixture')
-    }
-    await rm(actual, { recursive: true })
+  dispose(): Promise<void> {
+    return this.directory.dispose()
   }
 }
