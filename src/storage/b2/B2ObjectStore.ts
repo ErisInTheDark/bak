@@ -80,6 +80,14 @@ export default class B2ObjectStore implements ObjectStore {
       if (existing.sha1 === sha1 && existing.size === bytes.byteLength) return
       throw new Error(`b2 object ${key} already exists with different content`)
     }
+    await this.#send(key, bytes, sha1, signal)
+  }
+
+  async replace(key: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+    await this.#send(key, bytes, sha1Hex(bytes), signal)
+  }
+
+  async #send(key: string, bytes: Uint8Array, sha1: string, signal?: AbortSignal): Promise<void> {
     await this.#authorised(async session => {
       const pending = this.#upload ??= this.#getUploadTarget(session, signal)
       try {

@@ -61,7 +61,7 @@ export default class SnapshotStore {
       await this.git.run(['symbolic-ref', 'HEAD', 'refs/heads/snapshots'], { ...request, gitDirectory: main })
       await this.git.run(['config', 'bak.formatVersion', '1'], { ...request, gitDirectory: main })
     }
-    await this.#checkStorage(signal)
+    await this.checkStorage(signal)
     try {
       await writeFile(join(this.root, SnapshotStore.pathspecFileName),
         '# Add source paths to back up, one per line.\n' +
@@ -75,11 +75,11 @@ export default class SnapshotStore {
 
   async commit(options: SnapshotCommitOptions): Promise<SnapshotCommitResult> {
     options.signal?.throwIfAborted()
-    await this.#checkStorage(options.signal)
+    await this.checkStorage(options.signal)
     if (!options.identity.name.trim() || !options.identity.email.trim() || /[\r\n<>]/.test(options.identity.name + options.identity.email)) {
       throw new Error('a valid Git author name and email are required')
     }
-    const main = this.#directory('main')
+    const main = this.directory('main')
     const base: GitRequest = {
       cwd: this.root, gitDirectory: main, identity: options.identity,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -184,22 +184,7 @@ export default class SnapshotStore {
       const selected = (path: Parameters<PathspecEvaluator['enter']>[0]) => evaluator.enter(path, context).selected
       captured.set(identity.id, 'capturing')
       try {
-        const directory = this.#directory(identity.id)
-        try {
-          await mkdir(directory)
-          await this.git.run(['init', '--bare', '--template=', `--object-format=${identity.objectFormat}`, directory], {
-            cwd: this.root, ...(options.signal ? { signal: options.signal } : {}),
-          })
-        } catch (error) {
-          if (errorCode(error) !== 'EEXIST') throw error
-          if ((await lstat(directory)).isSymbolicLink()) throw new Error('repository object storage cannot be a link')
-        }
-        const storage = await this.git.run(['rev-parse', '--is-bare-repository', '--show-object-format'], {
-          cwd: this.root, gitDirectory: directory, ...(options.signal ? { signal: options.signal } : {}),
-        })
-        if (storage.stdout.toString().trim().split(/\r?\n/).join('\n') !== `true\n${identity.objectFormat}`) {
-          throw new Error('repository backup storage has an incompatible format')
-        }
+        const directory = await this.initRepositoryStore(identity.id, identity.objectFormat, options.signal)
         const result = await repositoryCapture.capture({
           source, identity, directory, author: options.identity, transaction,
           ...(options.signal ? { signal: options.signal } : {}),
@@ -218,7 +203,7 @@ export default class SnapshotStore {
       return state
     })
     const format = (store: string) => store === 'main' ? 'sha1' as const : catalog.get(store)!.objectFormat
-    const request = (store: string): GitRequest => ({ ...base, gitDirectory: this.#directory(store) })
+    const request = (store: string): GitRequest => ({ ...base, gitDirectory: this.directory(store) })
     const blob = async (contents: string, store: string) => ObjectReference.oid(
       (await this.git.run(['hash-object', '-w', '--stdin'], { ...request(store), input: contents })).stdout.toString(), format(store),
     )
@@ -344,19 +329,42 @@ export default class SnapshotStore {
     return { commit, changed: true }
   }
 
-  #directory(id: string): string {
+  /** Git directory of `main` or a repository store id. */
+  directory(id: string): string {
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('invalid repository identity')
     return id === 'main' ? join(this.root, '.bak', 'main.git') : join(this.root, '.bak', 'repos', `${id}.git`)
   }
 
-  async #checkStorage(signal?: AbortSignal): Promise<void> {
+  /** Creates or validates a repository store; returns its Git directory. */
+  async initRepositoryStore(id: string, objectFormat: 'sha1' | 'sha256', signal?: AbortSignal): Promise<string> {
+    if (id === 'main') throw new Error('invalid repository identity')
+    const directory = this.directory(id)
+    const request = { cwd: this.root, ...(signal ? { signal } : {}) }
+    try {
+      await mkdir(directory)
+      await this.git.run(['init', '--bare', '--template=', `--object-format=${objectFormat}`, directory], request)
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error
+      if ((await lstat(directory)).isSymbolicLink()) throw new Error('repository object storage cannot be a link')
+    }
+    const storage = await this.git.run(['rev-parse', '--is-bare-repository', '--show-object-format'], {
+      ...request, gitDirectory: directory,
+    })
+    if (storage.stdout.toString().trim().split(/\r?\n/).join('\n') !== `true\n${objectFormat}`) {
+      throw new Error('repository backup storage has an incompatible format')
+    }
+    return directory
+  }
+
+  /** Rejects storage that bak did not initialise. */
+  async checkStorage(signal?: AbortSignal): Promise<void> {
     for (const path of ['.bak', '.bak/repos', '.bak/main.git', '.bak/main.git/objects', '.bak/main.git/refs']) {
       signal?.throwIfAborted()
       const entry = await lstat(join(this.root, path))
       if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('backup storage must use real owned directories')
     }
     const request = {
-      cwd: this.root, gitDirectory: this.#directory('main'), ...(signal ? { signal } : {}),
+      cwd: this.root, gitDirectory: this.directory('main'), ...(signal ? { signal } : {}),
     }
     const version = await this.git.run(['config', '--get', 'bak.formatVersion'], { ...request, acceptExitCodes: [0, 1] })
     const format = await this.git.run(['rev-parse', '--is-bare-repository', '--show-object-format'], request)

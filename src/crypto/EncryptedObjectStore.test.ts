@@ -42,6 +42,9 @@ test('identical puts are idempotent and different content under the same name re
   await store.putImmutable('packs/a', pattern(100))
   assert.deepEqual(inner.objects.get('packs/a'), stored)
   await assert.rejects(store.putImmutable('packs/a', pattern(101)))
+  await store.replace('HEAD', pattern(3))
+  await store.replace('HEAD', pattern(4))
+  assert.deepEqual(await store.get('HEAD'), Buffer.from(pattern(4)))
 })
 
 test('tampering, truncation, renaming and a different passphrase are rejected', async () => {

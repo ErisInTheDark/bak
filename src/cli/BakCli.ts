@@ -6,10 +6,11 @@ import { parseArgs } from 'node:util'
 import PathspecEvaluator from '../config/PathspecEvaluator.ts'
 import RemoteLocation from '../config/RemoteLocation.ts'
 import GitProcess, { type GitIdentity } from '../git/GitProcess.ts'
-import { nativePath } from '../filesystem/scanning-utils.ts'
+import { errorCode, nativePath } from '../filesystem/scanning-utils.ts'
+import SnapshotRemote from '../remote/SnapshotRemote.ts'
 import SnapshotReader from '../snapshot/SnapshotReader.ts'
 import SnapshotStore from '../snapshot/SnapshotStore.ts'
-import openRemoteStore from '../storage/open-remote-store.ts'
+import openRemoteStore, { type RemoteStore } from '../storage/open-remote-store.ts'
 
 export interface CliOutput {
   readonly stdout: Writable
@@ -28,6 +29,26 @@ interface CommandContext {
 
 async function readPathspec(root: string): Promise<string> {
   return new TextDecoder('utf-8', { fatal: true }).decode(await readFile(join(root, SnapshotStore.pathspecFileName)))
+}
+
+async function readOptionalPathspec(root: string): Promise<string | undefined> {
+  try {
+    return await readPathspec(root)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/** Opens the folder's `@remote`, or `url` when given, with the folder's `@env` overrides. */
+async function openFolderRemote(root: string, url: string | undefined, signal?: AbortSignal): Promise<RemoteStore> {
+  const pathspec = url === undefined ? await readPathspec(root) : await readOptionalPathspec(root)
+  const evaluator = pathspec === undefined ? undefined : new PathspecEvaluator(pathspec)
+  const location = url === undefined ? evaluator?.getRemote() : RemoteLocation.parse(url)
+  if (!location) throw new Error(`add @remote = b2://bucket[/prefix] to ${SnapshotStore.pathspecFileName}`)
+  return openRemoteStore({
+    location, ...(evaluator ? { overrides: evaluator.getEnvironment() } : {}), ...(signal ? { signal } : {}),
+  })
 }
 
 const commands: Readonly<Record<string, (context: CommandContext) => Promise<void>>> = {
@@ -102,8 +123,7 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
   remote: async context => {
     if (context.arguments.length !== 1 || context.arguments[0] !== 'check') throw new Error('remote requires check')
     const signal = context.signal
-    const { location, key: encryptionKey, store } = await openRemoteStore(
-      new PathspecEvaluator(await readPathspec(context.root)), signal)
+    const { location, key: encryptionKey, store } = await openFolderRemote(context.root, undefined, signal)
     const key = `bak-probe/${randomUUID()}`
     const bytes = new TextEncoder().encode(`bak remote check ${key}\n`)
     await store.putImmutable(key, bytes, signal)
@@ -119,6 +139,23 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
     }
     context.output.stdout.write(`authorised for ${RemoteLocation.format(location)} (key id ${encryptionKey.id.toString('hex')}); `
       + 'encrypted put/get/range/head/delete ok\n')
+  },
+  push: async context => {
+    if (context.arguments.length) throw new Error('push does not accept positional arguments')
+    const { location, store } = await openFolderRemote(context.root, undefined, context.signal)
+    const url = RemoteLocation.format(location)
+    const result = await new SnapshotRemote(context.root, store, url).push(context.signal)
+    const short = result.snapshot.slice(0, 12)
+    context.output.stdout.write(result.changed
+      ? `pushed ${short} to ${url} (${result.packs} new packs, ${(result.bytes / 1024 / 1024).toFixed(1)} MiB)\n`
+      : `${url} is up to date (${short})\n`)
+  },
+  clone: async context => {
+    if (context.arguments.length > 1) throw new Error('clone accepts at most one b2:// url')
+    const { location, store } = await openFolderRemote(context.root, context.arguments[0], context.signal)
+    const url = RemoteLocation.format(location)
+    const snapshot = await SnapshotRemote.clone(context.root, store, url, context.signal)
+    context.output.stdout.write(`cloned ${url} at ${snapshot.slice(0, 12)} into ${context.root}; all stores verified\n`)
   },
 }
 
@@ -138,12 +175,12 @@ export default class BakCli {
         },
       })
       if (values.help) {
-        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path] | remote check\n')
+        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path] | remote check | push | clone [url]\n')
         return 0
       }
       const [command, ...arguments_] = positionals
       const handler = command ? commands[command] : undefined
-      if (!handler) throw new Error('choose init, commit, log, show or remote')
+      if (!handler) throw new Error('choose init, commit, log, show, remote, push or clone')
       signal?.throwIfAborted()
       await handler({
         root: resolve(values.root ?? process.cwd()), arguments: arguments_, output: this.output,

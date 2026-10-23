@@ -44,6 +44,14 @@ export default class EncryptedObjectStore implements ObjectStore {
   constructor(private readonly inner: ObjectStore, private readonly key: EncryptionKey) {}
 
   async putImmutable(name: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+    await this.inner.putImmutable(name, this.#encrypt(name, bytes), signal)
+  }
+
+  async replace(name: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+    await this.inner.replace(name, this.#encrypt(name, bytes), signal)
+  }
+
+  #encrypt(name: string, bytes: Uint8Array): Buffer {
     const salt = this.key.objectSalt(name, bytes)
     const header = Buffer.alloc(headerSize)
     magic.copy(header)
@@ -59,7 +67,7 @@ export default class EncryptedObjectStore implements ObjectStore {
       const start = index * chunkSize
       parts.push(cipher.update(bytes.subarray(start, start + chunkLength(bytes.byteLength, index))), cipher.final(), cipher.getAuthTag())
     }
-    await this.inner.putImmutable(name, Buffer.concat(parts), signal)
+    return Buffer.concat(parts)
   }
 
   async get(name: string, signal?: AbortSignal): Promise<Uint8Array | undefined> {

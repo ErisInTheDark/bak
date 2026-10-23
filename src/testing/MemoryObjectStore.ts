@@ -11,6 +11,10 @@ export default class MemoryObjectStore implements ObjectStore {
     this.objects.set(key, Uint8Array.from(bytes))
   }
 
+  async replace(key: string, bytes: Uint8Array): Promise<void> {
+    this.objects.set(key, Uint8Array.from(bytes))
+  }
+
   async get(key: string): Promise<Uint8Array | undefined> {
     const bytes = this.objects.get(key)
     return bytes && Uint8Array.from(bytes)

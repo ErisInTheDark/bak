@@ -82,8 +82,8 @@ Backup storage cannot be selected, including through links. Source files, indexe
 - Not an atomic filesystem snapshot; before/after checks cannot detect every concurrent change.
 - Preserves bytes, mode, size, modification/change timestamps, empty directories and recorded link relationships.
 - No Windows ACL/alternate-stream or Linux extended-attribute capture.
-- No remote push/fetch, encryption, materialisation or destructive restore command.
-- Local Git objects are unencrypted. Selected config/hooks/other files may contain secrets; protect backup storage.
+- No materialisation or destructive restore command. Remote push/clone are described in [remote backups](remote.md).
+- Local Git objects are unencrypted; remote copies are encrypted. Selected config/hooks/other files may contain secrets; protect backup storage.
 - Windows validated locally; Linux execution remains unverified.
 
 Do not treat this development slice as a full-fidelity replacement for platform backup tooling.

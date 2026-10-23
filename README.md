@@ -14,11 +14,11 @@ bak log
 bak show HEAD repo:/widget/src/index.ts
 ````
 
-`bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Existing backups using `bak.pathspec` need a one-time manual rename to `.bakspec` before their next commit; the stored history remains in `.bak`. Remote storage can be connected and checked, but snapshots are not pushed or fetched yet.
+`bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Existing backups using `bak.pathspec` need a one-time manual rename to `.bakspec` before their next commit; the stored history remains in `.bak`. `bak push` publishes snapshots to the folder's encrypted remote; `bak clone` recovers them.
 
 Commit captures the entire pathspec; there is no staging command. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `show <snapshot>` lists the snapshot root; supplying a file path streams its bytes.
 
-Snapshots retain their objects locally without automatic eviction. No push/fetch, restore command, live projection or mounted historical view exists yet. Remote objects are encrypted, but local Git objects in `.bak` are not. Protect the backup directory appropriately.
+Snapshots retain their objects locally without automatic eviction. No filesystem restore command, live projection or mounted historical view exists yet. Remote objects are encrypted, but local Git objects in `.bak` are not. Protect the backup directory appropriately.
 
 See [snapshot contracts and limits](docs/snapshots.md) before relying on this development version. Source-change checks are not an atomic filesystem snapshot, and platform metadata coverage is limited.
 
@@ -53,7 +53,14 @@ bak remote check
 
 `remote check` writes, reads, range-reads and deletes one encrypted `bak-probe/<uuid>` object, and prints the passphrase's key id. The key needs list buckets, read, write and delete file capabilities. Credentials load only for `remote` commands and never enter `process.env`, so Git subprocesses do not inherit them. Store lookups run from the checkout folder regardless of `--root` or the current directory.
 
-`ObjectStore` is the storage boundary; `B2ObjectStore` implements it over the B2 native API. Objects are immutable: repeating identical bytes is a no-op, different bytes under an existing key reject. Uploads are single requests (B2 limit 5 GB). Conditional writes for ref publication are not implemented.
+````sh
+bak push
+bak --root C:/restore-drill clone b2://my-bak-bucket/personal
+````
+
+`push` uploads every object of the folder's `.bak` stores as encrypted Git packs and publishes the latest snapshot. `clone` rebuilds `.bak` in a folder without one and verifies every store. Clone into a scratch folder occasionally to prove recovery. One writer per remote prefix; see [remote backups](docs/remote.md) for the layout, publication rules and limits.
+
+`ObjectStore` is the storage boundary; `B2ObjectStore` implements it over the B2 native API. Objects are immutable: repeating identical bytes is a no-op, different bytes under an existing key reject. Only `replace`, used for the remote `HEAD` pointer, overwrites. Uploads are single requests (B2 limit 5 GB). Conditional writes for ref publication are not implemented.
 
 `EncryptedObjectStore` wraps the backend. Each object stores a 53-byte header (magic, format version, key id, salt, plaintext size) followed by AES-256-GCM chunks of 64 KiB, so ranged reads fetch only the header and covering chunks. Every chunk authenticates the header and object name; tampering, truncation, renamed objects and a different passphrase are rejected. The per-object salt is derived from the name and contents, so re-uploading identical bytes stays a no-op. Object names remain plaintext.
 
