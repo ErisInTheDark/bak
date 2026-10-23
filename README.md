@@ -18,7 +18,7 @@ bak show HEAD repo:/widget/src/index.ts
 
 Commit captures the entire pathspec; there is no staging command. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `show <snapshot>` lists the snapshot root; supplying a file path streams its bytes.
 
-Snapshots retain their objects locally without automatic eviction. No push/fetch, encryption, restore command, live projection or mounted historical view exists yet. Local Git objects are not encrypted by bak. Protect the backup directory appropriately.
+Snapshots retain their objects locally without automatic eviction. No push/fetch, restore command, live projection or mounted historical view exists yet. Remote objects are encrypted, but local Git objects in `.bak` are not. Protect the backup directory appropriately.
 
 See [snapshot contracts and limits](docs/snapshots.md) before relying on this development version. Source-change checks are not an atomic filesystem snapshot, and platform metadata coverage is limited.
 
@@ -29,7 +29,10 @@ Remote storage uses Backblaze B2, the only supported backend. B2 application key
 ````dotenv
 B2_APPLICATION_KEY_ID=${wb:B2_APPLICATION_KEY_ID}
 B2_APPLICATION_KEY=${wb:B2_APPLICATION_KEY}
+BAK_ENCRYPTION_PASSPHRASE=${wb:BAK_ENCRYPTION_PASSPHRASE}
 ````
+
+Everything sent to B2 is encrypted client-side; there is no plaintext remote mode. The passphrase derives the key with scrypt using a fixed salt, so every machine can derive it from the passphrase alone. Use at least 16 characters, ideally 5+ random words or a password-manager string. **Losing the passphrase makes remote backups unreadable.**
 
 Each backup folder chooses its destination in `.bakspec`. A prefix lets several folders share one bucket and one bucket-restricted key. See [settings](docs/pathspec.md#settings).
 
@@ -48,9 +51,11 @@ A folder can override any checkout `.env` value, for example to use a more speci
 bak remote check
 ````
 
-`remote check` writes, reads, range-reads and deletes one `bak-probe/<uuid>` object. The key needs list buckets, read, write and delete file capabilities. Credentials load only for `remote` commands and never enter `process.env`, so Git subprocesses do not inherit them. Store lookups run from the checkout folder regardless of `--root` or the current directory.
+`remote check` writes, reads, range-reads and deletes one encrypted `bak-probe/<uuid>` object, and prints the passphrase's key id. The key needs list buckets, read, write and delete file capabilities. Credentials load only for `remote` commands and never enter `process.env`, so Git subprocesses do not inherit them. Store lookups run from the checkout folder regardless of `--root` or the current directory.
 
 `ObjectStore` is the storage boundary; `B2ObjectStore` implements it over the B2 native API. Objects are immutable: repeating identical bytes is a no-op, different bytes under an existing key reject. Uploads are single requests (B2 limit 5 GB). Conditional writes for ref publication are not implemented.
+
+`EncryptedObjectStore` wraps the backend. Each object stores a 53-byte header (magic, format version, key id, salt, plaintext size) followed by AES-256-GCM chunks of 64 KiB, so ranged reads fetch only the header and covering chunks. Every chunk authenticates the header and object name; tampering, truncation, renamed objects and a different passphrase are rejected. The per-object salt is derived from the name and contents, so re-uploading identical bytes stays a no-op. Object names remain plaintext.
 
 ## development
 

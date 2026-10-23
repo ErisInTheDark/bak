@@ -75,7 +75,7 @@ export default class B2ObjectStore implements ObjectStore {
 
   async putImmutable(key: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
     const sha1 = sha1Hex(bytes)
-    const existing = await this.head(key, signal)
+    const existing = await this.#stat(key, signal)
     if (existing) {
       if (existing.sha1 === sha1 && existing.size === bytes.byteLength) return
       throw new Error(`b2 object ${key} already exists with different content`)
@@ -121,6 +121,11 @@ export default class B2ObjectStore implements ObjectStore {
   }
 
   async head(key: string, signal?: AbortSignal): Promise<ObjectHead | undefined> {
+    const stat = await this.#stat(key, signal)
+    return stat && { size: stat.size }
+  }
+
+  async #stat(key: string, signal?: AbortSignal): Promise<{ size: number, sha1: string } | undefined> {
     const response = await this.#download('HEAD', key, undefined, signal)
     if (!response) return undefined
     const size = Number(response.headers.get('Content-Length'))

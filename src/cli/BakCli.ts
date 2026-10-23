@@ -3,14 +3,13 @@ import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Writable } from 'node:stream'
 import { parseArgs } from 'node:util'
-import loadEnvironment from '../config/load-environment.ts'
 import PathspecEvaluator from '../config/PathspecEvaluator.ts'
 import RemoteLocation from '../config/RemoteLocation.ts'
 import GitProcess, { type GitIdentity } from '../git/GitProcess.ts'
 import { nativePath } from '../filesystem/scanning-utils.ts'
 import SnapshotReader from '../snapshot/SnapshotReader.ts'
 import SnapshotStore from '../snapshot/SnapshotStore.ts'
-import B2ObjectStore from '../storage/b2/B2ObjectStore.ts'
+import openRemoteStore from '../storage/open-remote-store.ts'
 
 export interface CliOutput {
   readonly stdout: Writable
@@ -103,13 +102,8 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
   remote: async context => {
     if (context.arguments.length !== 1 || context.arguments[0] !== 'check') throw new Error('remote requires check')
     const signal = context.signal
-    const evaluator = new PathspecEvaluator(await readPathspec(context.root))
-    const location = evaluator.getRemote()
-    if (!location) throw new Error(`add @remote = b2://bucket[/prefix] to ${SnapshotStore.pathspecFileName}`)
-    const environment = await loadEnvironment({
-      required: B2ObjectStore.environmentNames, overrides: evaluator.getEnvironment(), ...(signal ? { signal } : {}),
-    })
-    const store = B2ObjectStore.fromEnvironment(environment, location)
+    const { location, key: encryptionKey, store } = await openRemoteStore(
+      new PathspecEvaluator(await readPathspec(context.root)), signal)
     const key = `bak-probe/${randomUUID()}`
     const bytes = new TextEncoder().encode(`bak remote check ${key}\n`)
     await store.putImmutable(key, bytes, signal)
@@ -123,7 +117,8 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
     } finally {
       await store.delete(key, signal)
     }
-    context.output.stdout.write(`authorised for ${RemoteLocation.format(location)}; put/get/range/head/delete ok\n`)
+    context.output.stdout.write(`authorised for ${RemoteLocation.format(location)} (key id ${encryptionKey.id.toString('hex')}); `
+      + 'encrypted put/get/range/head/delete ok\n')
   },
 }
 

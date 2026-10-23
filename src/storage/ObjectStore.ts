@@ -1,7 +1,5 @@
 export interface ObjectHead {
   readonly size: number
-  /** Lowercase hex SHA-1 of the stored bytes. */
-  readonly sha1: string
 }
 
 /** Half-open byte range: `start` inclusive, `end` exclusive. */

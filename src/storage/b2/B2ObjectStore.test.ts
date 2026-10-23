@@ -82,7 +82,7 @@ test('objects are stored once under the prefix, read back in whole or by range, 
   assert.deepEqual([...fake.files.keys()], ['home/personal/packs/a b'])
   assert.deepEqual(await objects.get('packs/a b'), bytes)
   assert.deepEqual(await objects.getRange('packs/a b', { start: 6, end: 8 }), bytes.slice(6, 8))
-  assert.deepEqual(await objects.head('packs/a b'), { size: bytes.byteLength, sha1: createHash('sha1').update(bytes).digest('hex') })
+  assert.deepEqual(await objects.head('packs/a b'), { size: bytes.byteLength })
   await assert.rejects(objects.putImmutable('packs/a b', new TextEncoder().encode('different')), /different content/u)
   await objects.delete('packs/a b')
   assert.equal(await objects.get('packs/a b'), undefined)
