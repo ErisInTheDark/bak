@@ -10,7 +10,6 @@ Register this checkout's CLI once with `vp install -g .`. In any backup folder:
 bak init
 # edit .bakspec: select source paths and @remote (see remote storage)
 bak commit -m "first backup"
-bak push
 bak log
 bak show HEAD repo:/widget/src/index.ts
 bak fsck
@@ -18,7 +17,7 @@ bak fsck
 
 `bak init` creates `.bak` storage and a comment-only `.bakspec` without overwriting an existing spec. Run it once in each backup folder before committing. By default commands use the current folder; `--root C:/backups/personal` selects a different folder. Folders created before contents moved to the remote are refused; initialise a new folder.
 
-Commit captures the entire pathspec; there is no staging command. It uploads file contents and repository objects to the remote as it goes, so it needs `@remote`, credentials and the passphrase. `.bak` keeps only trees, commits and manifests, plus a disposable index cache; local disk use during commit stays near one 128 MiB pack. `push` publishes the snapshot. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `log` works offline. `show <snapshot>` lists the snapshot root; supplying a file path reads its bytes from the remote.
+Commit captures the entire pathspec; there is no staging command. It uploads file contents and repository objects to the remote as it goes, so it needs `@remote`, credentials and the passphrase. `.bak` keeps only trees, commits and manifests, plus a disposable index cache; local disk use during commit stays near one 128 MiB pack. Commit then publishes the snapshot, so it is recoverable as soon as commit succeeds; if publishing fails, the captured snapshot stays local and `bak push` retries publication without rescanning. Configure Git `user.name`/`user.email`, or pass `--author "Name <email>"`. `log` works offline. `show <snapshot>` lists the snapshot root; supplying a file path reads its bytes from the remote.
 
 No filesystem restore command, live projection or mounted historical view exists yet. Local records (paths, metadata) are unencrypted; protect the backup directory appropriately.
 
@@ -56,12 +55,12 @@ bak remote check
 `remote check` writes, reads, range-reads and deletes one encrypted `bak-probe/<uuid>` object, and prints the passphrase's key id. The key needs list buckets, read, write and delete file capabilities. Credentials load only for commands that reach the remote (`commit`, `show` of a file, `remote`, `push`, `clone`, `fsck`) and never enter `process.env`, so Git subprocesses do not inherit them. Store lookups run from the checkout folder regardless of `--root` or the current directory.
 
 ````sh
-bak push
+bak commit -m "nightly"
 bak fsck
 bak --root C:/restore-drill clone b2://my-bak-bucket/personal
 ````
 
-`commit` uploads captured contents as encrypted content packs; `push` uploads bak's own trees and commits and publishes the latest snapshot. `fsck` downloads every pack of the published snapshot one at a time and verifies every object; run it after the first backup and periodically. `clone` rebuilds `.bak` metadata in a folder without one and checks every snapshot object is reachable; file contents stay remote and are read on demand. One writer per remote prefix; see [remote backups](docs/remote.md) for the layout, publication rules, verification, retries and limits.
+`commit` uploads captured contents as encrypted content packs, then uploads bak's own trees and commits and publishes the snapshot. `push` performs only that publication, to retry after a failed one. `fsck` downloads every pack of the published snapshot one at a time and verifies every object; run it after the first backup and periodically. `clone` rebuilds `.bak` metadata in a folder without one and checks every snapshot object is reachable; file contents stay remote and are read on demand. One writer per remote prefix; see [remote backups](docs/remote.md) for the layout, publication rules, verification, retries and limits.
 
 `ObjectStore` is the storage boundary; `B2ObjectStore` implements it over the B2 native API and is its only retry owner: network failures and `408`/`429`/`5xx` responses back off and retry up to 6 attempts. Objects are immutable: repeating identical bytes is a no-op, different bytes under an existing key reject. Only `replace`, used for the remote `HEAD` pointer, overwrites. Writes resolve only after B2's receipt confirms the stored SHA-1 and length. Uploads are single requests (B2 limit 5 GB). Conditional writes for ref publication are not implemented.
 

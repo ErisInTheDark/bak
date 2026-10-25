@@ -21,7 +21,7 @@ const reader = new SnapshotReader(backupRoot, content)
 const bytes = await reader.read(result.commit, 'repo:/widget/file.txt')
 ````
 
-Manifests read offline. File contents need the reader's `RemotePacks`; remote objects are fetched whole, then written. Signals are optional. `streamTarget` reads an already resolved target without resolving a moving ref again.
+`SnapshotStore.commit` captures only; `bak commit` then publishes with `SnapshotRemote.push`. Manifests read offline. File contents need the reader's `RemotePacks`; remote objects are fetched whole, then written. Signals are optional. `streamTarget` reads an already resolved target without resolving a moving ref again.
 
 ## storage and paths
 

@@ -102,7 +102,18 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
         }
       },
     })
-    context.output.stdout.write(result.changed ? `${result.commit}\n` : `no changes (${result.commit})\n`)
+    const short = result.commit.slice(0, 12)
+    let published
+    try {
+      published = await new SnapshotRemote(content).push(context.signal)
+    } catch (error) {
+      throw new Error(`captured ${short} locally but publishing failed: ${error instanceof Error ? error.message : String(error)}; run bak push to retry`,
+        { cause: error })
+    }
+    const captured = result.changed ? `committed ${short}` : `no changes (${short})`
+    context.output.stdout.write(published.changed
+      ? `${captured} and published to ${content.url} (${published.packs} metadata packs, ${mebibytes(published.bytes)})\n`
+      : `${captured}; ${content.url} is up to date\n`)
   },
   log: async context => {
     if (context.arguments.length) throw new Error('log does not accept positional arguments')

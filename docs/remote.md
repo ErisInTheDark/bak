@@ -1,10 +1,9 @@
 # remote backups
 
-The remote is the backup's object storage. `bak commit` uploads captured file contents and repository objects as encrypted content packs; the backup folder keeps only bak's own trees, commits and records. `bak push` publishes them. All remote bytes pass through `EncryptedObjectStore`; see the README for credentials and the passphrase.
+The remote is the backup's object storage. `bak commit` uploads captured file contents and repository objects as encrypted content packs, keeps only bak's own trees, commits and records locally, then publishes the snapshot. `bak push` retries publication alone after a failed one. All remote bytes pass through `EncryptedObjectStore`; see the README for credentials and the passphrase.
 
 ````sh
 bak commit -m "nightly"
-bak push
 bak fsck
 bak --root C:/restore-drill clone b2://my-bak-bucket/personal
 bak --root C:/restore-drill show HEAD repo:/widget/package.json
@@ -31,10 +30,13 @@ stores/<store>/metadata/pack-<hash>.idx
 2. Per store, collect the object ids covered by those packs plus packs this folder uploaded during an interrupted commit that still exist remotely.
 3. Files stream into a throwaway staging repository in `.bak/staging/<transaction>/`. Every 128 MiB of uncovered content is packed, uploaded and wiped. Repository objects are packed straight from the source repository in batches of about 128 MiB.
 4. Every captured object must be covered before the snapshot commit is written with its new `packs.json`.
+5. Publish, as below. An unchanged capture still publishes a snapshot the remote lacks.
 
 Local disk use stays near one pack. A failed commit leaves uploaded packs remotely; the rerun reuses them. New repository identities derive from their location so reruns find their packs.
 
-## push
+## publication (end of commit, or `push`)
+
+A snapshot captured but not yet published is not recoverable: its trees and manifest exist only locally. If publication fails, commit reports the captured snapshot and `bak push` publishes it without rescanning sources.
 
 1. Read the published state. Its snapshot must exist locally and be an ancestor of `refs/heads/snapshots`; otherwise push rejects rather than hiding remote history.
 2. Content packs added since the published snapshot must exist remotely.
@@ -60,7 +62,7 @@ Pack indexes are cached in `.bak/cache/remote/<url hash>/`. The cache is disposa
 ## limits
 
 - One writer per remote prefix. B2 has no compare-and-swap; the `HEAD` re-read narrows but does not close races. Use separate prefixes for separate folders or machines.
-- Commit, push, show, clone and fsck need the remote; log and manifest reads do not.
+- Commit, push, show of a file, clone and fsck need the remote; log and manifest reads do not.
 - Packs and single remote objects are encrypted and read whole in memory; a single file larger than about 1 GiB is slow, and B2 limits single uploads to 5 GB.
 - Deltas only form within one upload batch. No remote garbage collection or repacking: failed commits and pushes leave unreferenced packs, and B2 keeps old `HEAD` versions.
 - No filesystem restore, mount or bounded object cache yet.
