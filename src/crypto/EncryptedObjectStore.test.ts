@@ -47,6 +47,17 @@ test('identical puts are idempotent and different content under the same name re
   assert.deepEqual(await store.get('HEAD'), Buffer.from(pattern(4)))
 })
 
+test('output that does not decrypt back is never sent', async () => {
+  const inner = new MemoryObjectStore()
+  let calls = 0
+  const drifting: EncryptionKey = Object.create(key, {
+    objectSalt: { value: key.objectSalt.bind(key) },
+    objectKey: { value: (salt: Uint8Array) => (calls++ === 0 ? key : otherKey).objectKey(salt) },
+  })
+  await assert.rejects(new EncryptedObjectStore(inner, drifting).putImmutable('packs/a', pattern(100)), /encrypted object packs\/a/u)
+  assert.equal(inner.objects.size, 0)
+})
+
 test('tampering, truncation, renaming and a different passphrase are rejected', async () => {
   const { inner, store } = setup()
   const size = 2 * chunk + 5

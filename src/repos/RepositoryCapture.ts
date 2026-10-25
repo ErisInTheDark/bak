@@ -1,8 +1,9 @@
 import { lstat, readlink, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
-import { PassThrough, Readable, Writable } from 'node:stream'
-import GitProcess, { GitTreeEntry, type GitIdentity, type GitRequest } from '../git/GitProcess.ts'
-import { FileCapture } from '../filesystem/capture-file.ts'
+import { Writable } from 'node:stream'
+import GitProcess, { GitCommit, GitTreeEntry, type GitIdentity, type GitRequest } from '../git/GitProcess.ts'
+import type { FileCapture } from '../filesystem/capture-file.ts'
+import type ContentStaging from '../snapshot/ContentStaging.ts'
 import { Metadata, nativePath, scanningIO, sourcePath } from '../filesystem/scanning-utils.ts'
 import { ObjectReference, type AdministrativeEntry, type CapturedRepository, type RepositoryIdentity } from '../snapshot/snapshot-format.ts'
 import type { RepositoryInfo } from './RepositorySelection.ts'
@@ -11,7 +12,9 @@ import type { PhysicalPath } from '../config/PathspecEvaluator.ts'
 export interface RepositoryCaptureRequest {
   readonly source: RepositoryInfo
   readonly identity: RepositoryIdentity
+  /** Local store for bak's own records; captured objects and file contents go to `staging`. */
   readonly directory: string
+  readonly staging: ContentStaging
   readonly author: GitIdentity
   readonly transaction: string
   readonly signal?: AbortSignal
@@ -42,23 +45,13 @@ export default class RepositoryCapture {
     }
     const refsBefore = (await this.#git.run(['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], source)).stdout
     const objects = await this.#objects(source)
-    const retained = new Set(await this.#objects(destination))
-    const missing = objects.filter(oid => !retained.has(oid))
-    if (missing.length) {
-      const stream = new PassThrough()
-      const transfer = await Promise.allSettled([
-        this.#git.run(['pack-objects', '--stdout'], {
-          ...source, input: Readable.from(missing.map(oid => `${oid}\n`)), output: stream,
-        }),
-        this.#git.run(['index-pack', '--stdin', `--keep=bak ${request.transaction}`], {
-          ...destination, input: stream,
-        }),
-      ])
-      const failure = transfer.find(result => result.status === 'rejected')
-      if (failure?.status === 'rejected') throw failure.reason
+    const store = request.identity.id
+    const format = request.source.objectFormat
+    await request.staging.repository(store, format, sourceDirectory, request.signal)
+    for (const oid of objects) {
+      if (!await request.staging.covers(store, oid)) throw new Error('repository object transfer is incomplete')
     }
-    const available = new Set(await this.#objects(destination))
-    if (objects.some(oid => !available.has(oid))) throw new Error('repository object transfer is incomplete')
+    const stage = (file: FileCapture) => request.staging.file(store, format, file, request.signal)
     // Traverse refs and reflogs without fetching promised objects. Git observes
     // the source's shallow boundary; missing objects inside it are failures.
     let revisionTail = ''
@@ -118,10 +111,7 @@ export default class RepositoryCapture {
           })
           await walk(path, entryPath, [...ancestors, canonical])
         } else {
-          const oid = await FileCapture.read(inspected, async input =>
-            ObjectReference.oid((await this.#git.run(['hash-object', '-w', '--stdin'], {
-              ...destination, input,
-            })).stdout.toString(), request.source.objectFormat), request.signal)
+          const oid = await stage(inspected)
           administrative.push({
             path: entryPath, kind: 'file', metadata, oid, ...symbolic,
             ...(stats.isSymbolicLink() ? { resolvedMetadata: inspected.metadata } : {}),
@@ -138,28 +128,25 @@ export default class RepositoryCapture {
       const path = sourcePath(join(sourceDirectory, 'objects', 'info', name))
       if (!await scanningIO.exists(path)) continue
       const inspected = await scanningIO.inspect(path)
-      const oid = await FileCapture.read(inspected, async input =>
-        ObjectReference.oid((await this.#git.run(['hash-object', '-w', '--stdin'], {
-          ...destination, input,
-        })).stdout.toString(), request.source.objectFormat), request.signal)
+      const oid = await stage(inspected)
       administrative.push({ path: `objects/info/${name}`, kind: 'file', metadata: inspected.metadata, oid })
     }
     const refsAfter = (await this.#git.run(['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], source)).stdout
     if (!refsBefore.equals(refsAfter)) throw new Error('repository refs changed during capture')
     const state = ObjectReference.oid((await this.#git.run(['hash-object', '-w', '--stdin'], {
       ...destination, input: JSON.stringify({ administrative, nested }),
-    })).stdout.toString(), request.source.objectFormat)
+    })).stdout.toString(), format)
     const treeEntries: GitTreeEntry[] = [
       { name: 'state.json', mode: '100644', type: 'blob', oid: state },
       ...administrative.flatMap<GitTreeEntry>((entry, index) => entry.oid
         ? [{ name: String(index).padStart(10, '0'), mode: '100644', type: 'blob', oid: entry.oid }] : []),
     ]
-    const tree = ObjectReference.oid((await this.#git.run(['mktree', '-z'], {
+    const tree = ObjectReference.oid((await this.#git.run(['mktree', '-z', '--missing'], {
       ...destination, input: GitTreeEntry.encode(treeEntries),
-    })).stdout.toString(), request.source.objectFormat)
-    const adminCommit = ObjectReference.oid((await this.#git.run(['commit-tree', tree, '-m', 'repository administrative snapshot'], {
-      ...destination,
-    })).stdout.toString(), request.source.objectFormat)
+    })).stdout.toString(), format)
+    const adminCommit = await GitCommit.write(this.#git, destination, format, {
+      tree, parents: [], identity: request.author, message: 'repository administrative snapshot',
+    })
     await this.#git.run(['update-ref', `refs/bak/captures/${request.transaction}/admin`, adminCommit], destination)
     return {
       identity: request.identity,

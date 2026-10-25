@@ -44,11 +44,20 @@ export default class EncryptedObjectStore implements ObjectStore {
   constructor(private readonly inner: ObjectStore, private readonly key: EncryptionKey) {}
 
   async putImmutable(name: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
-    await this.inner.putImmutable(name, this.#encrypt(name, bytes), signal)
+    await this.inner.putImmutable(name, this.#sealed(name, bytes), signal)
   }
 
   async replace(name: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
-    await this.inner.replace(name, this.#encrypt(name, bytes), signal)
+    await this.inner.replace(name, this.#sealed(name, bytes), signal)
+  }
+
+  /** Encrypts, then decrypts the exact output, so nothing unreadable is ever sent. */
+  #sealed(name: string, bytes: Uint8Array): Buffer {
+    const stored = this.#encrypt(name, bytes)
+    const header = this.#header(name, stored.subarray(0, headerSize))
+    const check = this.#decrypt(name, header, 0, chunkCount(header.size) - 1, stored.subarray(headerSize))
+    if (!check.equals(bytes)) throw this.#corrupt(name, 'did not decrypt back to its plaintext before upload')
+    return stored
   }
 
   #encrypt(name: string, bytes: Uint8Array): Buffer {

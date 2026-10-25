@@ -3,9 +3,55 @@ import { devNull } from 'node:os'
 import { Readable, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
+export type ObjectFormat = 'sha1' | 'sha256'
+
 export interface GitIdentity {
   readonly name: string
   readonly email: string
+}
+
+export interface GitCommit {
+  readonly tree: string
+  readonly parents: readonly string[]
+  readonly identity: GitIdentity
+  readonly message: string
+  /** Seconds since the epoch. */
+  readonly time: number
+  /** Minutes east of UTC. */
+  readonly offset: number
+}
+
+export namespace GitCommit {
+  /** Raw commit object for `hash-object -t commit`, which unlike commit-tree does not require parents locally. */
+  export function encode(commit: GitCommit): string {
+    const { name, email } = commit.identity
+    if (/[\0\r\n<>]/.test(name + email) || /\0/.test(commit.message) ||
+      ![commit.tree, ...commit.parents].every(oid => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid))) {
+      throw new Error('invalid Git commit')
+    }
+    const sign = commit.offset < 0 ? '-' : '+'
+    const minutes = Math.abs(commit.offset)
+    const zone = `${sign}${String(Math.floor(minutes / 60)).padStart(2, '0')}${String(minutes % 60).padStart(2, '0')}`
+    const person = `${name} <${email}> ${Math.floor(commit.time)} ${zone}`
+    const message = commit.message.endsWith('\n') ? commit.message : `${commit.message}\n`
+    return [
+      `tree ${commit.tree}`, ...commit.parents.map(parent => `parent ${parent}`),
+      `author ${person}`, `committer ${person}`, '', message,
+    ].join('\n')
+  }
+
+  /** Writes a commit stamped now into the request's repository and returns its id. */
+  export async function write(
+    git: GitProcess, request: GitRequest, format: ObjectFormat, commit: Omit<GitCommit, 'time' | 'offset'>,
+  ): Promise<string> {
+    const now = new Date()
+    const result = await git.run(['hash-object', '-t', 'commit', '-w', '--stdin'], {
+      ...request, input: encode({ ...commit, time: now.getTime() / 1000, offset: -now.getTimezoneOffset() }),
+    })
+    const oid = result.stdout.toString().trim()
+    if (!(format === 'sha1' ? /^[a-f0-9]{40}$/ : /^[a-f0-9]{64}$/).test(oid)) throw new Error(`invalid ${format} object ID`)
+    return oid
+  }
 }
 
 export interface GitRequest {
@@ -65,7 +111,7 @@ export default class GitProcess {
       } : {}),
     })
     const child = spawn('git', [
-      '-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
+      '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'core.longpaths=true',
       '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : devNull}`,
       ...(request.gitDirectory ? [`--git-dir=${request.gitDirectory}`] : []),
       ...args,

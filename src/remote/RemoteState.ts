@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
+import type { ObjectFormat } from '../git/GitProcess.ts'
 
-export type ObjectFormat = 'sha1' | 'sha256'
+/** Content packs hold captured file and repository objects (uploaded by commit); metadata packs hold bak's own trees, commits and records (uploaded by push). */
+export type PackKind = 'content' | 'metadata'
 
 export interface RemoteReference {
   readonly name: string
@@ -11,14 +13,17 @@ export interface RemoteReference {
 export interface RemoteStoreState {
   readonly id: string
   readonly objectFormat: ObjectFormat
-  /** Every pack needed to recover the store, as `pack-<hash>`. */
-  readonly packs: readonly string[]
+  /** Every metadata pack needed to rebuild the store's local objects, as `pack-<hash>`. */
+  readonly metadata: readonly string[]
   readonly refs: readonly RemoteReference[]
 }
 
-/** Immutable, content-addressed description of a complete published backup. */
+/**
+ * Immutable, content-addressed description of a published backup. Content packs are
+ * listed by the snapshot's own `.bak-meta/packs.json`.
+ */
 interface RemoteState {
-  readonly version: 1
+  readonly version: 2
   readonly snapshot: string
   readonly previous: string | null
   readonly stores: readonly RemoteStoreState[]
@@ -44,8 +49,12 @@ namespace RemoteState {
     return /^states\/[0-9a-f]{64}\.json$/u.test(value)
   }
 
-  export function packKey(store: string, pack: string, extension: 'pack' | 'idx'): string {
-    return `stores/${store}/packs/${pack}.${extension}`
+  export function isPack(value: unknown): value is string {
+    return typeof value === 'string' && /^pack-(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
+  }
+
+  export function packKey(store: string, kind: PackKind, pack: string, extension: 'pack' | 'idx'): string {
+    return `stores/${store}/${kind}/${pack}.${extension}`
   }
 
   export function encode(state: RemoteState): Uint8Array {
@@ -54,18 +63,18 @@ namespace RemoteState {
 
   export function parse(bytes: Uint8Array): RemoteState {
     const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-    if (!record(value) || value.version !== 1 || !oid(value.snapshot, 'sha1') ||
+    if (!record(value) || value.version !== 2 || !oid(value.snapshot, 'sha1') ||
       !(value.previous === null || (typeof value.previous === 'string' && isKey(value.previous))) ||
       !Array.isArray(value.stores)) {
-      throw new Error('invalid remote state')
+      throw new Error('invalid or unsupported remote state; it was published by another bak version')
     }
     const stores = value.stores as unknown[]
     const valid = stores.every(store => {
       if (!record(store) || typeof store.id !== 'string' || !/^[a-zA-Z0-9_-]+$/u.test(store.id) ||
         (store.objectFormat !== 'sha1' && store.objectFormat !== 'sha256') ||
-        !Array.isArray(store.packs) || !Array.isArray(store.refs)) return false
+        !Array.isArray(store.metadata) || !Array.isArray(store.refs)) return false
       const format = store.objectFormat
-      return store.packs.every(pack => typeof pack === 'string' && /^pack-[0-9a-f]{40,64}$/u.test(pack)) &&
+      return store.metadata.every(isPack) &&
         store.refs.every(reference => record(reference) && oid(reference.oid, format) &&
           typeof reference.name === 'string' && /^refs\/[^\0-\x20~^:?*[\\]+$/u.test(reference.name) &&
           !reference.name.includes('..'))

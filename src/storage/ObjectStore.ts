@@ -13,9 +13,12 @@ export interface ByteRange {
  * authentication and retries.
  */
 export default interface ObjectStore {
-  /** Stores bytes once. Repeating identical bytes is a no-op; different bytes under an existing key reject. */
+  /**
+   * Stores bytes once. Repeating identical bytes is a no-op; different bytes under an existing key reject.
+   * Resolves only after the backend confirms the stored bytes.
+   */
   putImmutable(key: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>
-  /** Overwrites the key. Reserved for small pointers; no compare-and-swap. */
+  /** Overwrites the key, with the same confirmation. Reserved for small pointers; no compare-and-swap. */
   replace(key: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>
   get(key: string, signal?: AbortSignal): Promise<Uint8Array | undefined>
   /** Rejects when the key is missing. */

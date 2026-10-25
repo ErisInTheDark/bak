@@ -1,17 +1,18 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import PathspecEvaluator, { type SelectionContext, type SourceBinding } from '../config/PathspecEvaluator.ts'
 import Scanner, { type RepositoryRecord, type ScanRecord } from '../filesystem/Scanner.ts'
-import { FileCapture } from '../filesystem/capture-file.ts'
 import { errorCode, nativePath, scanningIO } from '../filesystem/scanning-utils.ts'
-import GitProcess, { GitTreeEntry, type GitIdentity, type GitRequest } from '../git/GitProcess.ts'
+import GitProcess, { GitCommit, GitTreeEntry, type GitIdentity, type GitRequest, type ObjectFormat } from '../git/GitProcess.ts'
+import type RemotePacks from '../remote/RemotePacks.ts'
 import RepositoryCapture from '../repos/RepositoryCapture.ts'
 import RepositorySelection, { RepositoryInfo } from '../repos/RepositorySelection.ts'
+import ContentStaging from './ContentStaging.ts'
 import SnapshotGraph, { SnapshotGraphData, type SnapshotTreeWriter } from './SnapshotGraph.ts'
 import SnapshotReader from './SnapshotReader.ts'
 import {
-  ObjectReference, SnapshotManifest,
+  ObjectReference, SnapshotManifest, SnapshotPacks,
   type CapturedRepository, type RepositoryIdentity, type SnapshotMount,
 } from './snapshot-format.ts'
 
@@ -19,6 +20,8 @@ export interface SnapshotCommitOptions {
   readonly pathspec: string
   readonly message: string
   readonly identity: GitIdentity
+  /** Remote receiving captured contents; only bak's own records stay local. */
+  readonly content: RemotePacks
   readonly relocate?: readonly string[]
   readonly signal?: AbortSignal
   readonly report?: (record: Extract<ScanRecord, { type: 'problem' | 'skipped' }>) => void
@@ -29,6 +32,18 @@ export interface SnapshotCommitResult {
   readonly changed: boolean
 }
 
+/**
+ * New repository identities derive from their location, so a rerun after an interrupted
+ * capture finds the content packs it already uploaded under the same store.
+ */
+function stableIdentity(location: string, catalog: ReadonlyMap<string, RepositoryIdentity>): string {
+  for (let attempt = 0; ; attempt++) {
+    const hex = createHash('sha256').update(`${location}\0${attempt}`).digest('hex')
+    const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+    if (!catalog.has(id)) return id
+  }
+}
+
 interface CapturedRepositoryState {
   readonly repository: CapturedRepository
   readonly selection: SelectionContext
@@ -36,6 +51,8 @@ interface CapturedRepositoryState {
 
 export default class SnapshotStore {
   static readonly pathspecFileName = '.bakspec'
+  /** Version 2 keeps captured contents remote-only. */
+  static readonly formatVersion = '2'
 
   constructor(readonly root: string, readonly git = new GitProcess()) {}
 
@@ -59,7 +76,7 @@ export default class SnapshotStore {
       const request = { cwd: this.root, ...(signal ? { signal } : {}) }
       await this.git.run(['init', '--bare', '--template=', '--object-format=sha1', main], request)
       await this.git.run(['symbolic-ref', 'HEAD', 'refs/heads/snapshots'], { ...request, gitDirectory: main })
-      await this.git.run(['config', 'bak.formatVersion', '1'], { ...request, gitDirectory: main })
+      await this.git.run(['config', 'bak.formatVersion', SnapshotStore.formatVersion], { ...request, gitDirectory: main })
     }
     await this.checkStorage(signal)
     try {
@@ -89,6 +106,7 @@ export default class SnapshotStore {
     })
     const previousCommit = head.code === 0 ? ObjectReference.oid(head.stdout.toString(), 'sha1') : null
     const previous = previousCommit ? await new SnapshotReader(this.root).manifest(previousCommit, options.signal) : null
+    const previousPacks = previousCommit ? await new SnapshotReader(this.root).packs(previousCommit, options.signal) : null
     const discover = async (report?: SnapshotCommitOptions['report']) => {
       const records: ScanRecord[] = []
       for await (const record of new Scanner(new PathspecEvaluator(options.pathspec)).scan(
@@ -151,7 +169,7 @@ export default class SnapshotStore {
         throw new Error('repository name belongs to another stored identity')
       }
       const current: RepositoryIdentity = {
-        id: identity?.id ?? randomUUID(), name, source: anchor.source,
+        id: identity?.id ?? stableIdentity(common, catalog), name, source: anchor.source,
         commonDirectory: anchor.commonDirectory, objectFormat: anchor.objectFormat,
       }
       identities.set(common, current)
@@ -160,6 +178,7 @@ export default class SnapshotStore {
     if ([...relocations].some(name => !usedRelocations.has(name))) throw new Error('relocation acknowledgement does not match a changed source')
     const projection = graph.project(names)
     const transaction = randomUUID()
+    await using staging = new ContentStaging(options.content, previousPacks, transaction)
     const captured = new Map<string, CapturedRepositoryState | 'capturing'>()
     const repositoryCapture = new RepositoryCapture()
     const captureRepository = async (source: RepositoryInfo, inherited?: SelectionContext): Promise<CapturedRepository> => {
@@ -167,8 +186,9 @@ export default class SnapshotStore {
       let identity = identities.get(key) ?? [...catalog.values()].find(item =>
         item.commonDirectory.root + item.commonDirectory.path === key)
       if (!identity) {
+        const id = stableIdentity(key, catalog)
         identity = {
-          id: randomUUID(), name: `administrative-${randomUUID()}`,
+          id, name: `administrative-${id}`,
           commonDirectory: source.commonDirectory, source: source.source, objectFormat: source.objectFormat,
         }
         catalog.set(identity.id, identity)
@@ -186,7 +206,7 @@ export default class SnapshotStore {
       try {
         const directory = await this.initRepositoryStore(identity.id, identity.objectFormat, options.signal)
         const result = await repositoryCapture.capture({
-          source, identity, directory, author: options.identity, transaction,
+          source, identity, directory, staging, author: options.identity, transaction,
           ...(options.signal ? { signal: options.signal } : {}),
           nested: nested => captureRepository(nested, context),
           selected, rulePaths: bindings.map(binding => binding.resolved),
@@ -202,7 +222,7 @@ export default class SnapshotStore {
       if (state === 'capturing') throw new Error('repository capture is incomplete')
       return state
     })
-    const format = (store: string) => store === 'main' ? 'sha1' as const : catalog.get(store)!.objectFormat
+    const format = (store: string): ObjectFormat => store === 'main' ? 'sha1' : catalog.get(store)!.objectFormat
     const request = (store: string): GitRequest => ({ ...base, gitDirectory: this.directory(store) })
     const blob = async (contents: string, store: string) => ObjectReference.oid(
       (await this.git.run(['hash-object', '-w', '--stdin'], { ...request(store), input: contents })).stdout.toString(), format(store),
@@ -210,7 +230,7 @@ export default class SnapshotStore {
     const content = new Map<string, Map<string, string>>()
     const mounts = new Map<string, SnapshotMount | 'building'>()
     const writer: SnapshotTreeWriter = {
-      tree: async (entries, store) => ObjectReference.oid((await this.git.run(['mktree', '-z'], {
+      tree: async (entries, store) => ObjectReference.oid((await this.git.run(['mktree', '-z', '--missing'], {
         ...request(store), input: GitTreeEntry.encode(entries),
       })).stdout.toString(), format(store)),
       entry: async (id, store) => {
@@ -232,9 +252,7 @@ export default class SnapshotStore {
         const objects = content.get(id) ?? new Map<string, string>()
         let oid = objects.get(store)
         if (!oid) {
-          oid = await FileCapture.read(entry, async input => ObjectReference.oid(
-            (await this.git.run(['hash-object', '-w', '--stdin'], { ...request(store), input })).stdout.toString(), format(store),
-          ), options.signal)
+          oid = await staging.file(store, format(store), entry, options.signal)
           objects.set(store, oid)
           content.set(id, objects)
         }
@@ -253,9 +271,10 @@ export default class SnapshotStore {
           ...base, cwd: nativePath(repository.commonDirectory), gitDirectory: nativePath(repository.gitDirectory), acceptExitCodes: [0, 1],
         })
         const parent = sourceHead.code === 0 ? ObjectReference.oid(sourceHead.stdout.toString(), repository.objectFormat) : null
-        const commit = ObjectReference.oid((await this.git.run([
-          'commit-tree', tree.oid, ...(parent ? ['-p', parent] : []), '-m', options.message,
-        ], request(identity.id))).stdout.toString(), repository.objectFormat)
+        // The parent lives in remote content packs, not this store.
+        const commit = await GitCommit.write(this.git, request(identity.id), repository.objectFormat, {
+          tree: tree.oid, parents: parent ? [parent] : [], identity: options.identity, message: options.message,
+        })
         const name = names.get(repository.id)!
         const reference = Buffer.from(repository.id).toString('hex')
         await this.git.run(['update-ref', `refs/bak/captures/${transaction}/working/${reference}`, commit], request(identity.id))
@@ -298,17 +317,26 @@ export default class SnapshotStore {
     if (previous && previousCommit && SnapshotManifest.contentKey(previous) === SnapshotManifest.contentKey(manifest)) {
       return { commit: previousCommit, changed: false }
     }
+    const packs = await staging.finish(options.signal)
+    for (const reference of [
+      ...manifest.entries.flatMap(entry => entry.objects),
+      ...manifest.repositories.flatMap(repository => repository.administrative.flatMap(entry =>
+        entry.oid ? [{ repository: repository.identity.id, oid: entry.oid }] : [])),
+    ]) {
+      if (!await staging.covers(reference.repository, reference.oid)) throw new Error('captured contents did not reach the remote')
+    }
     const metadata = await writer.tree([
       { name: 'manifest.json', mode: '100644', type: 'blob', oid: await blob(JSON.stringify(manifest), 'main') },
+      { name: 'packs.json', mode: '100644', type: 'blob', oid: await blob(SnapshotPacks.encode(packs), 'main') },
     ], 'main')
     const existingTree = await this.git.run(['ls-tree', '-z', mainTree.oid], base)
-    const tree = ObjectReference.oid((await this.git.run(['mktree', '-z'], {
+    const tree = ObjectReference.oid((await this.git.run(['mktree', '-z', '--missing'], {
       ...base,
       input: Buffer.concat([existingTree.stdout, Buffer.from(`040000 tree ${metadata}\t.bak-meta\0`)]),
     })).stdout.toString(), 'sha1')
-    const commit = ObjectReference.oid((await this.git.run([
-      'commit-tree', tree, ...(previousCommit ? ['-p', previousCommit] : []), '-m', options.message,
-    ], base)).stdout.toString(), 'sha1')
+    const commit = await GitCommit.write(this.git, base, 'sha1', {
+      tree, parents: previousCommit ? [previousCommit] : [], identity: options.identity, message: options.message,
+    })
     options.signal?.throwIfAborted()
     try {
       await this.git.run(['update-ref', 'refs/heads/snapshots', commit, previousCommit ?? '0'.repeat(40)], base)
@@ -367,9 +395,12 @@ export default class SnapshotStore {
       cwd: this.root, gitDirectory: this.directory('main'), ...(signal ? { signal } : {}),
     }
     const version = await this.git.run(['config', '--get', 'bak.formatVersion'], { ...request, acceptExitCodes: [0, 1] })
+    if (version.stdout.toString().trim() === '1') {
+      throw new Error('this backup folder was created by an earlier bak that kept file contents locally; initialise a new folder')
+    }
     const format = await this.git.run(['rev-parse', '--is-bare-repository', '--show-object-format'], request)
     const head = await this.git.run(['symbolic-ref', '--quiet', 'HEAD'], { ...request, acceptExitCodes: [0, 1] })
-    if (version.stdout.toString().trim() !== '1' ||
+    if (version.stdout.toString().trim() !== SnapshotStore.formatVersion ||
       format.stdout.toString().trim().split(/\r?\n/).join('\n') !== 'true\nsha1' ||
       head.stdout.toString().trim() !== 'refs/heads/snapshots') {
       throw new Error('unrecognised or incompatible backup storage; initialise a dedicated backup directory')

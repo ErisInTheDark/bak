@@ -1,17 +1,23 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { copyFile, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { Writable } from 'node:stream'
 import { errorCode } from '../filesystem/scanning-utils.ts'
-import GitProcess, { type GitRequest } from '../git/GitProcess.ts'
+import type { GitRequest, ObjectFormat } from '../git/GitProcess.ts'
 import SnapshotReader from '../snapshot/SnapshotReader.ts'
 import SnapshotStore from '../snapshot/SnapshotStore.ts'
-import type ObjectStore from '../storage/ObjectStore.ts'
-import RemoteState, { type ObjectFormat, type RemoteReference, type RemoteStoreState } from './RemoteState.ts'
+import type { SnapshotPacks } from '../snapshot/snapshot-format.ts'
+import RemotePacks, { lines } from './RemotePacks.ts'
+import RemoteState, { type RemoteReference, type RemoteStoreState } from './RemoteState.ts'
 
 export interface PushResult {
   readonly snapshot: string
   readonly changed: boolean
+  readonly packs: number
+  readonly bytes: number
+}
+
+export interface VerifyResult {
+  readonly snapshot: string
   readonly packs: number
   readonly bytes: number
 }
@@ -26,104 +32,89 @@ interface Published {
   readonly state: RemoteState
 }
 
-/** Splits streamed Git output into lines without the buffered-output limit. */
-function lines(onLine: (line: string) => void): Writable {
-  let pending = ''
-  return new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      const parts = (pending + chunk.toString('utf8')).split('\n')
-      pending = parts.pop()!
-      for (const part of parts) if (part) onLine(part)
-      callback()
-    },
-    final(callback) {
-      if (pending) onLine(pending)
-      callback()
-    },
-  })
-}
-
 /**
- * Publishes every object of every local store as encrypted Git packs and recovers them.
- * Remote: immutable packs/idx per store, immutable content-addressed states, and a
- * mutable `HEAD` naming the current state, replaced last. One writer per remote.
+ * Publishes and recovers a backup folder. Commit already uploaded captured contents as
+ * content packs; push uploads the folder's local metadata objects as metadata packs,
+ * writes an immutable state and replaces the mutable `HEAD` last. One writer per remote.
  */
 export default class SnapshotRemote {
-  static readonly maxPackSize = '128m'
-
   readonly #local: SnapshotStore
-  readonly #cache: string
 
-  constructor(
-    readonly root: string,
-    private readonly objects: ObjectStore,
-    readonly url: string,
-    private readonly git = new GitProcess(),
-  ) {
-    this.#local = new SnapshotStore(root, git)
-    this.#cache = join(root, '.bak', 'cache', 'remote', createHash('sha256').update(url).digest('hex').slice(0, 16))
+  constructor(private readonly packs: RemotePacks) {
+    this.#local = new SnapshotStore(packs.root, packs.git)
+  }
+
+  get root(): string {
+    return this.packs.root
   }
 
   async push(signal?: AbortSignal): Promise<PushResult> {
     await this.#local.checkStorage(signal)
     const snapshot = await this.#snapshotRef(signal)
     if (!snapshot) throw new Error('nothing to push; run bak commit first')
-    const previous = await SnapshotRemote.#published(this.objects, signal)
+    const previous = await SnapshotRemote.#published(this.packs, signal)
     if (previous) await this.#requireAncestor(previous.state.snapshot, snapshot, signal)
-    const temporary = join(this.root, '.bak', 'cache', `push-${randomUUID()}`)
+    const reader = new SnapshotReader(this.root)
+    const content = await reader.packs(snapshot, signal)
+    if (content.remote !== this.packs.url) throw new Error(`snapshot contents live on ${content.remote}, not ${this.packs.url}`)
+    const before = previous ? await reader.packs(previous.state.snapshot, signal) : null
+    for (const [store, packs] of Object.entries(content.stores)) {
+      const known = new Set(before?.stores[store] ?? [])
+      for (const pack of packs.filter(pack => !known.has(pack))) {
+        for (const extension of ['pack', 'idx'] as const) {
+          if (!await this.packs.objects.head(RemoteState.packKey(store, 'content', pack, extension), signal)) {
+            throw new Error(`content pack ${store}/${pack}.${extension} is missing from ${this.packs.url}; nothing was published`)
+          }
+        }
+      }
+    }
     let packs = 0
     let bytes = 0
-    try {
-      const stores: RemoteStoreState[] = []
-      for (const store of await this.#stores(signal)) {
-        const published = previous?.state.stores.find(item => item.id === store.id)
-        if (published && published.objectFormat !== store.objectFormat) throw new Error(`remote store ${store.id} has another object format`)
-        const available = new Set(published?.packs ?? [])
-        for (const pack of await this.#cachedPacks(store.id)) {
-          if (!available.has(pack) && await this.objects.head(RemoteState.packKey(store.id, pack, 'pack'), signal)) available.add(pack)
-        }
-        const covered = new Set<string>()
-        for (const pack of available) await this.#indexedObjects(store.id, pack, id => covered.add(id), signal)
-        const missing: string[] = []
-        await this.#run(store.id, ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'], {
-          output: lines(id => { if (!covered.has(id)) missing.push(id) }), ...(signal ? { signal } : {}),
-        })
-        if (missing.length) {
-          const uploaded = await this.#upload(store.id, missing, join(temporary, store.id), signal)
-          packs += uploaded.packs.length
-          bytes += uploaded.bytes
-          for (const pack of uploaded.packs) available.add(pack)
-        }
-        stores.push({ ...store, packs: [...available].sort(), refs: await this.#refs(store.id, signal) })
-      }
-      const state: RemoteState = { version: 1, snapshot, previous: previous?.key ?? null, stores }
-      const unchanged = previous && previous.state.snapshot === snapshot && packs === 0 &&
-        JSON.stringify(previous.state.stores) === JSON.stringify(stores)
-      if (unchanged) return { snapshot, changed: false, packs, bytes }
-      const encoded = RemoteState.encode(state)
-      const key = RemoteState.key(encoded)
-      await this.objects.putImmutable(key, encoded, signal)
-      const current = await SnapshotRemote.#headKey(this.objects, signal)
-      if (current !== (previous?.key ?? undefined)) {
-        throw new Error('another writer published to this remote during push; nothing was published')
-      }
-      await this.objects.replace(RemoteState.headKey, new TextEncoder().encode(key), signal)
-      return { snapshot, changed: true, packs, bytes }
-    } finally {
-      await rm(temporary, { recursive: true, force: true })
+    const stores: RemoteStoreState[] = []
+    for (const store of await this.#stores(signal)) {
+      const published = previous?.state.stores.find(item => item.id === store.id)
+      if (published && published.objectFormat !== store.objectFormat) throw new Error(`remote store ${store.id} has another object format`)
+      const known = new Set(published?.metadata ?? [])
+      for (const orphan of await this.packs.orphans(store.id, 'metadata', known, signal)) known.add(orphan)
+      const covered = await this.packs.covered(store.id, 'metadata', known, store.objectFormat, signal)
+      const directory = this.#local.directory(store.id)
+      const missing = (await this.packs.inventory(directory, signal)).filter(object => !covered.has(object.oid))
+      const uploaded = await this.packs.upload(store.id, 'metadata', store.objectFormat, directory, missing, signal)
+      packs += uploaded.packs.length
+      bytes += uploaded.bytes
+      for (const pack of uploaded.packs) known.add(pack)
+      stores.push({ ...store, metadata: [...known].sort(), refs: await this.#refs(store.id, signal) })
     }
+    const state: RemoteState = { version: 2, snapshot, previous: previous?.key ?? null, stores }
+    if (previous && previous.state.snapshot === snapshot && packs === 0 &&
+      JSON.stringify(previous.state.stores) === JSON.stringify(stores)) {
+      return { snapshot, changed: false, packs, bytes }
+    }
+    const encoded = RemoteState.encode(state)
+    const key = RemoteState.key(encoded)
+    await this.packs.objects.putImmutable(key, encoded, signal)
+    const current = await SnapshotRemote.#headKey(this.packs, signal)
+    if (current !== (previous?.key ?? undefined)) {
+      throw new Error('another writer published to this remote during push; nothing was published')
+    }
+    await this.packs.objects.replace(RemoteState.headKey, new TextEncoder().encode(key), signal)
+    return { snapshot, changed: true, packs, bytes }
   }
 
-  /** Recreates `.bak` from the remote into a folder without one, then verifies recoverability. */
-  static async clone(root: string, objects: ObjectStore, url: string, signal?: AbortSignal, git = new GitProcess()): Promise<string> {
+  /**
+   * Recreates `.bak` metadata from the remote into `packs.root`, which must lack `.bak`,
+   * then checks every object the latest snapshot needs is local or in its content packs.
+   */
+  static async clone(packs: RemotePacks, signal?: AbortSignal): Promise<string> {
+    const root = packs.root
     try {
       await stat(join(root, '.bak'))
       throw new Error('clone needs a folder without .bak storage')
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') throw error
     }
-    const published = await SnapshotRemote.#published(objects, signal)
-    if (!published) throw new Error(`${url} has no published snapshots`)
+    const published = await SnapshotRemote.#published(packs, signal)
+    if (!published) throw new Error(`${packs.url} has no published snapshots`)
     let hadPathspec = true
     try {
       await stat(join(root, SnapshotStore.pathspecFileName))
@@ -131,16 +122,8 @@ export default class SnapshotRemote {
       if (errorCode(error) !== 'ENOENT') throw error
       hadPathspec = false
     }
-    const local = new SnapshotStore(root, git)
-    await local.init(signal)
-    const remote = new SnapshotRemote(root, objects, url, git)
-    for (const store of published.state.stores) {
-      if (store.id !== 'main') await local.initRepositoryStore(store.id, store.objectFormat, signal)
-      for (const pack of store.packs) await remote.#fetchPack(store.id, pack, signal)
-      for (const reference of store.refs) await remote.#run(store.id, ['update-ref', reference.name, reference.oid], signal ? { signal } : {})
-      await remote.#run(store.id, ['fsck', '--connectivity-only', '--no-dangling', '--no-progress'], signal ? { signal } : {})
-    }
-    await remote.#verifyManifest(published.state, signal)
+    await SnapshotRemote.#restore(packs, published.state, signal)
+    await new SnapshotRemote(packs).#checkRecoverable(published.state, signal)
     if (!hadPathspec) {
       const manifest = await new SnapshotReader(root).manifest(published.state.snapshot, signal)
       await writeFile(join(root, SnapshotStore.pathspecFileName), manifest.pathspec)
@@ -148,25 +131,73 @@ export default class SnapshotRemote {
     return published.state.snapshot
   }
 
-  static async #headKey(objects: ObjectStore, signal?: AbortSignal): Promise<string | undefined> {
-    const bytes = await objects.get(RemoteState.headKey, signal)
+  /**
+   * Proves the published snapshot is recoverable from the remote alone: restores metadata into a
+   * scratch folder, then downloads every content pack one at a time and verifies every object.
+   */
+  async verify(signal?: AbortSignal): Promise<VerifyResult> {
+    await this.#local.checkStorage(signal)
+    const published = await SnapshotRemote.#published(this.packs, signal)
+    if (!published) throw new Error(`${this.packs.url} has no published snapshots`)
+    const scratch = join(this.root, '.bak', 'cache', `fsck-${randomUUID()}`)
+    try {
+      const packs = new RemotePacks(scratch, this.packs.objects, this.packs.url, { git: this.packs.git })
+      let bytes = await SnapshotRemote.#restore(packs, published.state, signal)
+      let count = published.state.stores.reduce((total, store) => total + store.metadata.length, 0)
+      const content = await new SnapshotRemote(packs).#checkRecoverable(published.state, signal)
+      for (const [store, list] of Object.entries(content.stores)) {
+        const format = published.state.stores.find(item => item.id === store)!.objectFormat
+        const directory = join(scratch, 'content', `${store}.git`)
+        await mkdir(directory, { recursive: true })
+        await packs.git.run(['init', '--bare', '-q', '--template=', `--object-format=${format}`, directory], { cwd: scratch, ...(signal ? { signal } : {}) })
+        for (const pack of list) {
+          bytes += await packs.fetch(store, 'content', pack, directory, format, signal)
+          count++
+          const packDirectory = join(directory, 'objects', 'pack')
+          for (const name of await readdir(packDirectory)) if (name.startsWith(`${pack}.`)) await unlink(join(packDirectory, name))
+        }
+      }
+      return { snapshot: published.state.snapshot, packs: count, bytes }
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }
+
+  /** Initialises storage in `packs.root` and restores every store's metadata packs and refs. */
+  static async #restore(packs: RemotePacks, state: RemoteState, signal?: AbortSignal): Promise<number> {
+    const local = new SnapshotStore(packs.root, packs.git)
+    await local.init(signal)
+    let bytes = 0
+    for (const store of state.stores) {
+      if (store.id !== 'main') await local.initRepositoryStore(store.id, store.objectFormat, signal)
+      const directory = local.directory(store.id)
+      for (const pack of store.metadata) bytes += await packs.fetch(store.id, 'metadata', pack, directory, store.objectFormat, signal)
+      for (const reference of store.refs) {
+        await packs.git.run(['update-ref', reference.name, reference.oid], { cwd: packs.root, gitDirectory: directory, ...(signal ? { signal } : {}) })
+      }
+    }
+    return bytes
+  }
+
+  static async #headKey(packs: RemotePacks, signal?: AbortSignal): Promise<string | undefined> {
+    const bytes = await packs.objects.get(RemoteState.headKey, signal)
     if (!bytes) return undefined
     const key = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
     if (!RemoteState.isKey(key)) throw new Error('remote HEAD is invalid')
     return key
   }
 
-  static async #published(objects: ObjectStore, signal?: AbortSignal): Promise<Published | undefined> {
-    const key = await SnapshotRemote.#headKey(objects, signal)
+  static async #published(packs: RemotePacks, signal?: AbortSignal): Promise<Published | undefined> {
+    const key = await SnapshotRemote.#headKey(packs, signal)
     if (!key) return undefined
-    const bytes = await objects.get(key, signal)
+    const bytes = await packs.objects.get(key, signal)
     if (!bytes) throw new Error(`remote HEAD names missing state ${key}`)
     if (RemoteState.key(bytes) !== key) throw new Error(`remote state ${key} does not match its name`)
     return { key, state: RemoteState.parse(bytes) }
   }
 
   #run(store: string, args: readonly string[], request: Partial<GitRequest>) {
-    return this.git.run(args, { cwd: this.root, gitDirectory: this.#local.directory(store), ...request })
+    return this.packs.git.run(args, { cwd: this.root, gitDirectory: this.#local.directory(store), ...request })
   }
 
   async #snapshotRef(signal?: AbortSignal): Promise<string | undefined> {
@@ -209,67 +240,12 @@ export default class SnapshotRemote {
     return refs.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   }
 
-  async #cachedPacks(store: string): Promise<string[]> {
-    try {
-      return (await readdir(join(this.#cache, store))).filter(name => name.endsWith('.idx')).map(name => name.slice(0, -'.idx'.length))
-    } catch (error) {
-      if (errorCode(error) === 'ENOENT') return []
-      throw error
-    }
-  }
-
-  /** Reads object ids from the pack's idx, downloading it into the disposable cache when absent. */
-  async #indexedObjects(store: string, pack: string, onObject: (id: string) => void, signal?: AbortSignal): Promise<void> {
-    const path = join(this.#cache, store, `${pack}.idx`)
-    let index: Buffer
-    try {
-      index = await readFile(path)
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error
-      const bytes = await this.objects.get(RemoteState.packKey(store, pack, 'idx'), signal)
-      if (!bytes) throw new Error(`remote pack index ${store}/${pack} is missing`)
-      index = Buffer.from(bytes)
-      await mkdir(join(this.#cache, store), { recursive: true })
-      await writeFile(path, index)
-    }
-    await this.#run(store, ['show-index'], {
-      input: index, output: lines(line => onObject(line.split(' ')[1]!)), ...(signal ? { signal } : {}),
-    })
-  }
-
-  async #upload(store: string, objects: readonly string[], directory: string, signal?: AbortSignal) {
-    await mkdir(directory, { recursive: true })
-    const packs: string[] = []
-    let bytes = 0
-    await this.#run(store, ['pack-objects', `--max-pack-size=${SnapshotRemote.maxPackSize}`, '-q', join(directory, 'pack')], {
-      input: `${objects.join('\n')}\n`, output: lines(hash => packs.push(`pack-${hash}`)), ...(signal ? { signal } : {}),
-    })
-    for (const pack of packs) {
-      for (const extension of ['pack', 'idx'] as const) {
-        const contents = await readFile(join(directory, `${pack}.${extension}`))
-        const key = RemoteState.packKey(store, pack, extension)
-        await this.objects.putImmutable(key, contents, signal)
-        if ((await this.objects.head(key, signal))?.size !== contents.byteLength) throw new Error(`remote ${key} did not verify after upload`)
-        bytes += contents.byteLength
-      }
-      await mkdir(join(this.#cache, store), { recursive: true })
-      await copyFile(join(directory, `${pack}.idx`), join(this.#cache, store, `${pack}.idx`))
-    }
-    return { packs, bytes }
-  }
-
-  /** index-pack rebuilds the idx and verifies every object rather than trusting the remote idx. */
-  async #fetchPack(store: string, pack: string, signal?: AbortSignal): Promise<void> {
-    const bytes = await this.objects.get(RemoteState.packKey(store, pack, 'pack'), signal)
-    if (!bytes) throw new Error(`remote pack ${store}/${pack} is missing`)
-    const result = await this.#run(store, ['index-pack', '--stdin'], { input: bytes, ...(signal ? { signal } : {}) })
-    const [kind, hash] = result.stdout.toString().trim().split('\t')
-    if ((kind !== 'pack' && kind !== 'keep') || `pack-${hash}` !== pack) throw new Error(`remote pack ${store}/${pack} did not verify`)
-    if (kind === 'keep') await unlink(join(this.#local.directory(store), 'objects', 'pack', `${pack}.keep`))
-  }
-
-  async #verifyManifest(state: RemoteState, signal?: AbortSignal): Promise<void> {
-    const manifest = await new SnapshotReader(this.root).manifest(state.snapshot, signal)
+  /** Every object the snapshot's manifest references must be local or in its content packs. */
+  async #checkRecoverable(state: RemoteState, signal?: AbortSignal): Promise<SnapshotPacks> {
+    const reader = new SnapshotReader(this.root)
+    const manifest = await reader.manifest(state.snapshot, signal)
+    const content = await reader.packs(state.snapshot, signal)
+    if (content.remote !== this.packs.url) throw new Error(`snapshot contents live on ${content.remote}, not ${this.packs.url}`)
     const required = new Map<string, Set<string>>()
     const add = (store: string, id: string) => required.set(store, (required.get(store) ?? new Set()).add(id))
     for (const entry of manifest.entries) for (const reference of entry.objects) add(reference.repository, reference.oid)
@@ -277,15 +253,25 @@ export default class SnapshotRemote {
     for (const repository of manifest.repositories) {
       add(repository.identity.id, repository.adminCommit)
       for (const id of repository.objects) add(repository.identity.id, id)
+      for (const entry of repository.administrative) if (entry.oid) add(repository.identity.id, entry.oid)
+    }
+    for (const store of Object.keys(content.stores)) {
+      if (!state.stores.some(item => item.id === store)) throw new Error(`remote lacks store ${store} listed by the snapshot`)
     }
     for (const [store, ids] of required) {
-      if (!state.stores.some(item => item.id === store)) throw new Error(`remote lacks store ${store} needed by the snapshot`)
+      const published = state.stores.find(item => item.id === store)
+      if (!published) throw new Error(`remote lacks store ${store} needed by the snapshot`)
       const missing: string[] = []
       await this.#run(store, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
-        input: `${[...ids].join('\n')}\n`, output: lines(line => { if (line.endsWith(' missing')) missing.push(line) }),
+        input: `${[...ids].join('\n')}\n`,
+        output: lines(line => { if (line.endsWith(' missing')) missing.push(line.split(' ')[0]!) }),
         ...(signal ? { signal } : {}),
       })
-      if (missing.length) throw new Error(`recovered store ${store} lacks ${missing.length} snapshot objects`)
+      if (!missing.length) continue
+      const covered = await this.packs.covered(store, 'content', content.stores[store] ?? [], published.objectFormat, signal)
+      const absent = missing.filter(oid => !covered.has(oid))
+      if (absent.length) throw new Error(`snapshot needs ${absent.length} objects of store ${store} that no remote pack holds`)
     }
+    return content
   }
 }

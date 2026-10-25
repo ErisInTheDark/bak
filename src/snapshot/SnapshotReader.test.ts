@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Writable } from 'node:stream'
+import RemotePacks from '../remote/RemotePacks.ts'
 import GitFixture from '../testing/GitFixture.ts'
+import MemoryObjectStore from '../testing/MemoryObjectStore.ts'
 import SnapshotStore from './SnapshotStore.ts'
 import SnapshotReader from './SnapshotReader.ts'
 import { SnapshotManifest } from './snapshot-format.ts'
+
+const url = 'b2://fixture-bucket/reader'
 
 test('readback merges independent descendant roots into synthetic directory listings', async () => {
   const fixture = await GitFixture.create()
@@ -16,11 +20,12 @@ test('readback merges independent descendant roots into synthetic directory list
     const root = fixture.path('backup')
     const store = new SnapshotStore(root)
     await store.init()
+    const content = new RemotePacks(root, new MemoryObjectStore(), url)
     await store.commit({
       pathspec: `#home = "${source}"\n!#home/hidden\n#home/hidden/keep = "${fixture.path('source/hidden/keep')}"`,
-      message: 'independent subtree', identity: { name: 'fixture', email: 'fixture@example.invalid' },
+      message: 'independent subtree', identity: { name: 'fixture', email: 'fixture@example.invalid' }, content,
     })
-    const reader = new SnapshotReader(root)
+    const reader = new SnapshotReader(root, content)
     assert.deepEqual((await reader.resolve('HEAD', 'home')).children, ['hidden', 'visible'])
     assert.deepEqual((await reader.resolve('HEAD', 'home/hidden')).children, ['keep'])
     assert.equal((await reader.read('HEAD', 'home/hidden/keep/file')).toString(), 'kept')
@@ -41,28 +46,26 @@ test('persisted metadata rejects invalid versions and unsafe object-store refere
   })), /invalid/)
 })
 
-test('streamed readback propagates cancellation without buffering a whole large file', async () => {
+test('a cancelled remote read writes nothing', async () => {
   const fixture = await GitFixture.create()
   try {
-    const source = await fixture.write('large', Buffer.alloc(17 * 1024 * 1024, 0xa5))
+    const source = await fixture.write('file', 'remote bytes')
     const root = fixture.path('backup')
     const store = new SnapshotStore(root)
     await store.init()
+    const content = new RemotePacks(root, new MemoryObjectStore(), url)
     await store.commit({
-      pathspec: `#large = "${source}"`, message: 'large file',
+      pathspec: `#file = "${source}"`, message: 'file', content,
       identity: { name: 'fixture', email: 'fixture@example.invalid' },
     })
+    const reader = new SnapshotReader(root, content)
+    const target = await reader.resolve('HEAD', 'file')
     const controller = new AbortController()
+    controller.abort(new Error('read cancelled'))
     let received = 0
-    const output = new Writable({
-      write(chunk: Buffer, _encoding, done) {
-        received += chunk.length
-        controller.abort(new Error('read cancelled'))
-        done()
-      },
-    })
-    await assert.rejects(new SnapshotReader(root).stream('HEAD', 'large', output, controller.signal), /read cancelled/)
-    assert.ok(received > 0 && received < 17 * 1024 * 1024)
+    const output = new Writable({ write(chunk: Buffer, _encoding, done) { received += chunk.length; done() } })
+    await assert.rejects(reader.streamTarget(target, output, controller.signal), /read cancelled/)
+    assert.equal(received, 0)
   } finally {
     await fixture.dispose()
   }

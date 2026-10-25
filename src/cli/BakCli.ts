@@ -7,6 +7,7 @@ import PathspecEvaluator from '../config/PathspecEvaluator.ts'
 import RemoteLocation from '../config/RemoteLocation.ts'
 import GitProcess, { type GitIdentity } from '../git/GitProcess.ts'
 import { errorCode, nativePath } from '../filesystem/scanning-utils.ts'
+import RemotePacks from '../remote/RemotePacks.ts'
 import SnapshotRemote from '../remote/SnapshotRemote.ts'
 import SnapshotReader from '../snapshot/SnapshotReader.ts'
 import SnapshotStore from '../snapshot/SnapshotStore.ts'
@@ -17,10 +18,13 @@ export interface CliOutput {
   readonly stderr: Writable
 }
 
+export type RemoteOpener = typeof openRemoteStore
+
 interface CommandContext {
   readonly root: string
   readonly arguments: readonly string[]
   readonly output: CliOutput
+  readonly openRemote: RemoteOpener
   readonly message?: string
   readonly author?: string
   readonly relocate?: readonly string[]
@@ -41,14 +45,23 @@ async function readOptionalPathspec(root: string): Promise<string | undefined> {
 }
 
 /** Opens the folder's `@remote`, or `url` when given, with the folder's `@env` overrides. */
-async function openFolderRemote(root: string, url: string | undefined, signal?: AbortSignal): Promise<RemoteStore> {
-  const pathspec = url === undefined ? await readPathspec(root) : await readOptionalPathspec(root)
+async function openFolderRemote(context: CommandContext, url?: string): Promise<RemoteStore> {
+  const pathspec = url === undefined ? await readPathspec(context.root) : await readOptionalPathspec(context.root)
   const evaluator = pathspec === undefined ? undefined : new PathspecEvaluator(pathspec)
   const location = url === undefined ? evaluator?.getRemote() : RemoteLocation.parse(url)
   if (!location) throw new Error(`add @remote = b2://bucket[/prefix] to ${SnapshotStore.pathspecFileName}`)
-  return openRemoteStore({
-    location, ...(evaluator ? { overrides: evaluator.getEnvironment() } : {}), ...(signal ? { signal } : {}),
+  return context.openRemote({
+    location, ...(evaluator ? { overrides: evaluator.getEnvironment() } : {}), ...(context.signal ? { signal: context.signal } : {}),
   })
+}
+
+async function openFolderPacks(context: CommandContext, url?: string): Promise<RemotePacks> {
+  const { location, store } = await openFolderRemote(context, url)
+  return new RemotePacks(context.root, store, RemoteLocation.format(location))
+}
+
+function mebibytes(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
 
 const commands: Readonly<Record<string, (context: CommandContext) => Promise<void>>> = {
@@ -75,9 +88,10 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
       if (!name || !email) throw new Error('configure Git user.name and user.email or provide --author "Name <email>"')
       identity = { name, email }
     }
+    const content = await openFolderPacks(context)
     const result = await new SnapshotStore(context.root).commit({
       pathspec: await readPathspec(context.root),
-      message: context.message, identity,
+      message: context.message, identity, content,
       ...(context.relocate ? { relocate: context.relocate } : {}),
       ...(context.signal ? { signal: context.signal } : {}),
       report: record => {
@@ -103,9 +117,9 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
   show: async context => {
     if (!context.arguments.length || context.arguments.length > 2) throw new Error('show requires <snapshot> [path]')
     const [snapshot, path = ''] = context.arguments
-    const reader = new SnapshotReader(context.root)
-    const target = await reader.resolve(snapshot!, path, context.signal)
+    const target = await new SnapshotReader(context.root).resolve(snapshot!, path, context.signal)
     if (target.entry?.kind === 'file') {
+      const reader = new SnapshotReader(context.root, await openFolderPacks(context))
       const output = new Writable({
         write(chunk: Buffer, _encoding, done) { context.output.stdout.write(chunk, done) },
       })
@@ -123,7 +137,7 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
   remote: async context => {
     if (context.arguments.length !== 1 || context.arguments[0] !== 'check') throw new Error('remote requires check')
     const signal = context.signal
-    const { location, key: encryptionKey, store } = await openFolderRemote(context.root, undefined, signal)
+    const { location, key: encryptionKey, store } = await openFolderRemote(context)
     const key = `bak-probe/${randomUUID()}`
     const bytes = new TextEncoder().encode(`bak remote check ${key}\n`)
     await store.putImmutable(key, bytes, signal)
@@ -142,25 +156,32 @@ const commands: Readonly<Record<string, (context: CommandContext) => Promise<voi
   },
   push: async context => {
     if (context.arguments.length) throw new Error('push does not accept positional arguments')
-    const { location, store } = await openFolderRemote(context.root, undefined, context.signal)
-    const url = RemoteLocation.format(location)
-    const result = await new SnapshotRemote(context.root, store, url).push(context.signal)
+    const packs = await openFolderPacks(context)
+    const result = await new SnapshotRemote(packs).push(context.signal)
     const short = result.snapshot.slice(0, 12)
     context.output.stdout.write(result.changed
-      ? `pushed ${short} to ${url} (${result.packs} new packs, ${(result.bytes / 1024 / 1024).toFixed(1)} MiB)\n`
-      : `${url} is up to date (${short})\n`)
+      ? `pushed ${short} to ${packs.url} (${result.packs} new metadata packs, ${mebibytes(result.bytes)})\n`
+      : `${packs.url} is up to date (${short})\n`)
   },
   clone: async context => {
     if (context.arguments.length > 1) throw new Error('clone accepts at most one b2:// url')
-    const { location, store } = await openFolderRemote(context.root, context.arguments[0], context.signal)
-    const url = RemoteLocation.format(location)
-    const snapshot = await SnapshotRemote.clone(context.root, store, url, context.signal)
-    context.output.stdout.write(`cloned ${url} at ${snapshot.slice(0, 12)} into ${context.root}; all stores verified\n`)
+    const packs = await openFolderPacks(context, context.arguments[0])
+    const snapshot = await SnapshotRemote.clone(packs, context.signal)
+    context.output.stdout.write(`cloned ${packs.url} at ${snapshot.slice(0, 12)} into ${context.root}; every snapshot object is local or remote\n`)
+  },
+  fsck: async context => {
+    if (context.arguments.length) throw new Error('fsck does not accept positional arguments')
+    const packs = await openFolderPacks(context)
+    const result = await new SnapshotRemote(packs).verify(context.signal)
+    context.output.stdout.write(`verified ${result.packs} packs (${mebibytes(result.bytes)}) of ${result.snapshot.slice(0, 12)} on ${packs.url}; every object is recoverable\n`)
   },
 }
 
 export default class BakCli {
-  constructor(readonly output: CliOutput = { stdout: process.stdout, stderr: process.stderr }) {}
+  constructor(
+    readonly output: CliOutput = { stdout: process.stdout, stderr: process.stderr },
+    private readonly openRemote: RemoteOpener = openRemoteStore,
+  ) {}
 
   async run(args: readonly string[], signal?: AbortSignal): Promise<number> {
     try {
@@ -175,15 +196,15 @@ export default class BakCli {
         },
       })
       if (values.help) {
-        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path] | remote check | push | clone [url]\n')
+        this.output.stdout.write('bak [--root <directory>] init | commit -m <message> | log | show <snapshot> [path] | remote check | push | clone [url] | fsck\n')
         return 0
       }
       const [command, ...arguments_] = positionals
       const handler = command ? commands[command] : undefined
-      if (!handler) throw new Error('choose init, commit, log, show, remote, push or clone')
+      if (!handler) throw new Error('choose init, commit, log, show, remote, push, clone or fsck')
       signal?.throwIfAborted()
       await handler({
-        root: resolve(values.root ?? process.cwd()), arguments: arguments_, output: this.output,
+        root: resolve(values.root ?? process.cwd()), arguments: arguments_, output: this.output, openRemote: this.openRemote,
         ...(values.message !== undefined ? { message: values.message } : {}),
         ...(values.author !== undefined ? { author: values.author } : {}),
         ...(values.relocate !== undefined ? { relocate: values.relocate } : {}),

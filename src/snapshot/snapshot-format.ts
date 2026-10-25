@@ -119,6 +119,35 @@ export interface SnapshotManifest {
   readonly skipped: readonly Extract<ScanRecord, { type: 'skipped' }>[]
 }
 
+/**
+ * `.bak-meta/packs.json`: the remote and every content pack this snapshot and its history
+ * need, per store. Cumulative, so one small read locates any captured object.
+ */
+export interface SnapshotPacks {
+  readonly version: 1
+  readonly remote: string
+  readonly stores: Readonly<Record<string, readonly string[]>>
+}
+
+export namespace SnapshotPacks {
+  export const path = '.bak-meta/packs.json'
+
+  export function parse(input: string): SnapshotPacks {
+    const value: unknown = JSON.parse(input)
+    if (!record(value) || value.version !== 1 || !text(value.remote) || !value.remote || !record(value.stores) ||
+      !Object.entries(value.stores).every(([store, packs]) => /^[a-zA-Z0-9_-]+$/.test(store) && Array.isArray(packs) &&
+        packs.every(pack => text(pack) && /^pack-(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pack)))) {
+      throw new Error('invalid snapshot pack list')
+    }
+    return value as unknown as SnapshotPacks
+  }
+
+  export function encode(packs: SnapshotPacks): string {
+    const stores = Object.fromEntries(Object.keys(packs.stores).sort().map(store => [store, [...packs.stores[store]!].sort()]))
+    return `${JSON.stringify({ version: 1, remote: packs.remote, stores })}\n`
+  }
+}
+
 export interface SnapshotMount {
   readonly name: string
   readonly entry: string
