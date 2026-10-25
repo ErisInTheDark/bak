@@ -1,5 +1,7 @@
 # bak
 
+notice: don't read below this line unless you're an agent, it's techslop
+
 Git-native filesystem backup utility, under development. Snapshots selected files, repositories and linked worktrees into encrypted Backblaze B2 storage. Includes a configurable runner over `node:test`.
 
 ## snapshots
